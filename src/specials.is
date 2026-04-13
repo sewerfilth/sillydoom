@@ -1,0 +1,1105 @@
+# specials.is — Sector specials: doors, lifts, crushers, lighting
+#
+# sp_thinkers uses string keys: sp_thinkers[format("{}", i)]
+
+THINK_DOOR    = 0
+THINK_FLOOR   = 1
+THINK_CEIL    = 2
+THINK_LIGHT   = 3
+THINK_PLAT    = 4
+
+DOOR_CLOSED   = 0
+DOOR_OPENING  = 1
+DOOR_OPEN     = 2
+DOOR_WAITING  = 3
+DOOR_CLOSING  = 4
+
+sp_thinkers    = {}
+sp_think_count = 0
+
+# W1 (single-use walk-trigger) lines that have already fired this level
+g_w1_used = {}
+
+# Set true when the player crosses/uses a secret exit (special 51 or 124).
+# game_exit_level reads + clears this to route to E?M9 instead of E?M(N+1).
+g_secret_exit = false
+
+# Side indices that scroll (special 48 — scrolling left)
+g_scroll_sides = {}
+g_scroll_count = 0
+
+DOOR_SPEED   = 2
+DOOR_WAIT    = 105
+FLOOR_SPEED  = 1
+PLAT_SPEED   = 4
+PLAT_WAIT    = 105
+
+function specials_init()
+    sp_thinkers    = {}
+    sp_think_count = 0
+    g_w1_used      = {}
+    g_scroll_sides = {}
+    g_scroll_count = 0
+    g_secret_exit  = false
+end
+
+function specials_init_scrollers()
+    if map_data == none
+        return
+    end
+    g_scroll_sides = {}
+    g_scroll_count = 0
+    for i in range(map_data.linedefs_count):
+        local ld = map_data.linedefs[i]
+        if ld.special == 48 and ld.front >= 0
+            g_scroll_sides[format("{}", g_scroll_count)] = ld.front
+            g_scroll_count = g_scroll_count + 1
+        end
+    end
+end
+
+function specials_tick_scrollers()
+    local i = 0
+    while i < g_scroll_count
+        local idx = g_scroll_sides[format("{}", i)]
+        if idx != none
+            local sd = map_data.sidedefs[idx]
+            sd.x_offset = sd.x_offset + 1
+            doomSetSideOffset(idx, sd.x_offset, sd.y_offset)
+        end
+        i = i + 1
+    end
+end
+
+function specials_tick()
+    g_sync_strobe_phase = g_sync_strobe_phase + 1
+    local active_count = 0
+    local i = 0
+    while i < sp_think_count
+        local th = sp_thinkers[format("{}", i)]
+        if th != none
+            if th.active
+                if th.type == THINK_DOOR
+                    specials_tick_door(th)
+                elif th.type == THINK_FLOOR
+                    specials_tick_floor(th)
+                elif th.type == THINK_PLAT
+                    specials_tick_plat(th)
+                elif th.type == THINK_CEIL
+                    specials_tick_crusher(th)
+                elif th.type == THINK_LIGHT
+                    specials_tick_light(th)
+                end
+                if th.active
+                    active_count = active_count + 1
+                end
+            end
+        end
+        i = i + 1
+    end
+    # Compact when most thinkers are dead — keeps the per-frame loop
+    # bounded to active thinkers + a small headroom. Without this, every
+    # door/lift/light ever activated stays in the dict forever.
+    if sp_think_count > 32 and active_count * 2 < sp_think_count
+        specials_compact_thinkers()
+    end
+    specials_tick_scrollers()
+end
+
+# Rebuild sp_thinkers as a dense array of just the live thinkers,
+# resetting sp_think_count. Lights are NEVER inactive (they tick forever
+# while the level is loaded) so this is mainly for doors/lifts/floors
+# that have finished moving.
+function specials_compact_thinkers()
+    local new_thinkers = {}
+    local new_count = 0
+    local i = 0
+    while i < sp_think_count
+        local th = sp_thinkers[format("{}", i)]
+        if th != none and th.active
+            new_thinkers[format("{}", new_count)] = th
+            new_count = new_count + 1
+        end
+        i = i + 1
+    end
+    sp_thinkers    = new_thinkers
+    sp_think_count = new_count
+end
+
+# Toggle a switch wall texture between SW1xxx and SW2xxx variants on the
+# linedef's front sidedef. Vanilla Doom switches all live in pairs:
+# pressed switches start with "SW1" and the unpressed look starts with
+# "SW2", or vice versa. We pick whichever slot (upper/middle/lower) holds
+# the switch and write the toggled name back through doomSetSidedefTexture.
+function specials_toggle_switch(linedef)
+    if linedef.front < 0
+        return
+    end
+    local sd = map_data.sidedefs[linedef.front]
+    local slots = {}
+    slots["0"] = sd.upper
+    slots["1"] = sd.middle
+    slots["2"] = sd.lower
+    local i = 0
+    while i < 3
+        local name = slots[format("{}", i)]
+        if name != none and strlen(name) >= 3
+            local prefix = substr(name, 0, 3)
+            local rest = substr(name, 3, strlen(name) - 3)
+            local toggled = ""
+            if prefix == "SW1"
+                toggled = "SW2" + rest
+            elif prefix == "SW2"
+                toggled = "SW1" + rest
+            end
+            if toggled != ""
+                doomSetSidedefTexture(linedef.front, i, toggled)
+                # Update the script-side cache too so a save snapshots it
+                if i == 0
+                    sd.upper = toggled
+                elif i == 1
+                    sd.middle = toggled
+                else
+                    sd.lower = toggled
+                end
+                return
+            end
+        end
+        i = i + 1
+    end
+end
+
+function specials_activate(linedef, side)
+    local special = linedef.special
+    local tag = linedef.tag
+
+    # -- Manual / use doors (no tag — operates on the linedef's back sector)
+    # 1   DR open door, close after wait                  (repeatable use)
+    # 26  DR blue key door
+    # 27  DR yellow key door
+    # 28  DR red key door
+    # 31  D1 open door stay open                          (one-shot use)
+    # 117 DR open door, close after wait — turbo
+    # 118 D1 open door stay open — turbo
+    if special == 1
+        specials_open_door_tag(tag, DOOR_SPEED, DOOR_WAIT)
+        return true
+    end
+    if special == 26
+        if player_has_key("blue")
+            specials_open_door_tag(tag, DOOR_SPEED, DOOR_WAIT)
+        else
+            audio_play_sfx(SFX_OOF)
+        end
+        return true
+    end
+    if special == 27
+        if player_has_key("yellow")
+            specials_open_door_tag(tag, DOOR_SPEED, DOOR_WAIT)
+        else
+            audio_play_sfx(SFX_OOF)
+        end
+        return true
+    end
+    if special == 28
+        if player_has_key("red")
+            specials_open_door_tag(tag, DOOR_SPEED, DOOR_WAIT)
+        else
+            audio_play_sfx(SFX_OOF)
+        end
+        return true
+    end
+    if special == 31
+        specials_open_door_tag(tag, DOOR_SPEED, -1)
+        return true
+    end
+    if special == 117
+        specials_open_door_tag(tag, DOOR_SPEED * 4, DOOR_WAIT)
+        return true
+    end
+    if special == 118
+        specials_open_door_tag(tag, DOOR_SPEED * 4, -1)
+        return true
+    end
+
+    # -- Switch doors (S1 = one-shot, SR = repeatable). All toggle the
+    # switch texture, play SWTCHN, then perform the action.
+    # 29  S1 raise door, close after wait
+    # 50  S1 close door
+    # 103 S1 open door stay open
+    # 111 S1 raise door turbo
+    # 112 S1 open door stay open turbo
+    # 113 S1 close door turbo
+    # 42  SR close door
+    # 61  SR open door stay open
+    # 63  SR raise door, close after wait
+    # 114 SR raise door turbo
+    # 115 SR open door stay open turbo
+    # 116 SR close door turbo
+    if special == 29 or special == 63
+        specials_open_door_tag(tag, DOOR_SPEED, DOOR_WAIT)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 50 or special == 42
+        specials_close_door_tag(tag, DOOR_SPEED)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 103 or special == 61
+        specials_open_door_tag(tag, DOOR_SPEED, -1)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 111 or special == 114
+        specials_open_door_tag(tag, DOOR_SPEED * 4, DOOR_WAIT)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 112 or special == 115
+        specials_open_door_tag(tag, DOOR_SPEED * 4, -1)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 113 or special == 116
+        specials_close_door_tag(tag, DOOR_SPEED * 4)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+
+    # -- Switch floors
+    # 18  S1 raise floor to next higher
+    # 23  S1 floor lower to lowest
+    # 60  SR floor lower to lowest
+    # 14  S1 raise floor 32
+    # 15  S1 raise floor 24
+    # 64  SR raise floor to lowest ceiling
+    # 101 S1 raise floor to lowest ceiling
+    # 45  SR floor lower to highest neighbor
+    # 70  SR floor lower to 8 above highest (turbo)
+    # 41  S1 ceiling lower to floor
+    # 43  SR ceiling lower to floor
+    if special == 18
+        specials_raise_floor_tag(tag)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 23 or special == 60
+        specials_lower_floor_tag(tag)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 14
+        specials_floor_by_tag(tag, 32)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 15
+        specials_floor_by_tag(tag, 24)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 64 or special == 101
+        specials_floor_to_lowest_ceil_tag(tag)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 45 or special == 70
+        specials_floor_to_highest_tag(tag)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+    if special == 41 or special == 43
+        specials_ceil_to_floor_tag(tag)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+
+    # -- Switch lifts
+    # 62  SR plat down-wait-up
+    # 10  W1 plat (also handled here when used/switched in some maps)
+    # 123 SR perpetual lift turbo (treated as a plat for now)
+    if special == 62 or special == 10 or special == 123
+        specials_plat_tag(tag)
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHN)
+        return true
+    end
+
+    # -- Switch exits
+    # 11  S1 normal exit
+    # 51  S1 secret exit
+    # 52  W1 normal exit (handled by walk-trigger as well)
+    if special == 11 or special == 52
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHX)
+        game_exit_level()
+        return true
+    end
+    if special == 51
+        specials_toggle_switch(linedef)
+        audio_play_sfx(SFX_SWTCHX)
+        g_secret_exit = true
+        game_exit_level()
+        return true
+    end
+
+    return false
+end
+
+function specials_open_door_tag(tag, speed, wait_tics)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            specials_add_door(i, speed, wait_tics)
+        end
+    end
+end
+
+function specials_add_door(sector_idx, speed, wait_tics)
+    local sec = map_data.sectors[sector_idx]
+    local th = {}
+    th.type       = THINK_DOOR
+    th.active     = true
+    th.sector_idx = sector_idx
+    th.speed      = speed
+    th.state      = DOOR_OPENING
+    th.wait_tics  = wait_tics
+    th.timer      = 0
+    th.top_h      = specials_lowest_ceil_neighbor(sector_idx) - 4
+    th.bottom_h   = sec.floor_h
+
+    audio_play_sfx(SFX_DOOR)
+
+    sp_thinkers[format("{}", sp_think_count)] = th
+    sp_think_count = sp_think_count + 1
+end
+
+function specials_tick_door(th)
+    local sec = map_data.sectors[th.sector_idx]
+
+    if th.state == DOOR_OPENING
+        sec.ceil_h = sec.ceil_h + th.speed
+        if sec.ceil_h >= th.top_h
+            sec.ceil_h = th.top_h
+            if th.wait_tics < 0
+                th.active = false
+            else
+                th.state = DOOR_WAITING
+                th.timer = 0
+            end
+        end
+    end
+
+    if th.state == DOOR_WAITING
+        th.timer = th.timer + 1
+        if th.timer >= th.wait_tics
+            th.state = DOOR_CLOSING
+            audio_play_sfx(SFX_DORCLS)
+        end
+    end
+
+    if th.state == DOOR_CLOSING
+        sec.ceil_h = sec.ceil_h - th.speed
+        if sec.ceil_h <= th.bottom_h
+            sec.ceil_h = th.bottom_h
+            th.active = false
+        end
+    end
+end
+
+function specials_raise_floor_tag(tag)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            local th = {}
+            th.type       = THINK_FLOOR
+            th.active     = true
+            th.sector_idx = i
+            th.speed      = FLOOR_SPEED
+            th.direction  = 1
+            th.target_h   = specials_next_higher_floor(i)
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+        end
+    end
+end
+
+function specials_lower_floor_tag(tag)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            local th = {}
+            th.type       = THINK_FLOOR
+            th.active     = true
+            th.sector_idx = i
+            th.speed      = FLOOR_SPEED
+            th.direction  = -1
+            th.target_h   = specials_lowest_floor_neighbor(i)
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+        end
+    end
+end
+
+function specials_tick_floor(th)
+    local sec = map_data.sectors[th.sector_idx]
+    sec.floor_h = sec.floor_h + th.speed * th.direction
+    if th.direction > 0 and sec.floor_h >= th.target_h
+        sec.floor_h = th.target_h
+        th.active = false
+    end
+    if th.direction < 0 and sec.floor_h <= th.target_h
+        sec.floor_h = th.target_h
+        th.active = false
+    end
+end
+
+function specials_plat_tag(tag)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            local th = {}
+            th.type       = THINK_PLAT
+            th.active     = true
+            th.sector_idx = i
+            th.speed      = PLAT_SPEED
+            th.state      = 0
+            th.timer      = 0
+            th.high_h     = sec.floor_h
+            th.low_h      = specials_lowest_floor_neighbor(i)
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+            audio_play_sfx(SFX_PSTART)
+        end
+    end
+end
+
+function specials_tick_plat(th)
+    local sec = map_data.sectors[th.sector_idx]
+    if th.state == 0
+        sec.floor_h = sec.floor_h - th.speed
+        if sec.floor_h <= th.low_h
+            sec.floor_h = th.low_h
+            th.state = 1
+            th.timer = 0
+            audio_play_sfx(SFX_PSTOP)
+        end
+    end
+    if th.state == 1
+        th.timer = th.timer + 1
+        if th.timer >= PLAT_WAIT
+            th.state = 2
+            audio_play_sfx(SFX_PSTART)
+        end
+    end
+    if th.state == 2
+        sec.floor_h = sec.floor_h + th.speed
+        if sec.floor_h >= th.high_h
+            sec.floor_h = th.high_h
+            th.active = false
+            audio_play_sfx(SFX_PSTOP)
+        end
+    end
+end
+
+function specials_tick_crusher(th)
+    local sec = map_data.sectors[th.sector_idx]
+    sec.ceil_h = sec.ceil_h + th.speed * th.direction
+    if th.direction < 0 and sec.ceil_h <= sec.floor_h + 8
+        th.direction = 1
+    end
+    if th.direction > 0 and sec.ceil_h >= th.top_h
+        th.direction = -1
+    end
+end
+
+# Light kinds:
+#   0 = strobe (vanilla 1/2/3)
+#   1 = glow   (vanilla 8)  — smooth in/out
+#   2 = sync_strobe (12/13) — strobes in lock-step with all others
+#   3 = fire   (vanilla 17) — random flicker biased toward bright
+LIGHT_STROBE      = 0
+LIGHT_GLOW        = 1
+LIGHT_SYNC_STROBE = 2
+LIGHT_FIRE        = 3
+g_sync_strobe_phase = 0   # tic counter, advanced once per frame in tick
+
+function specials_tick_light(th)
+    local sec = map_data.sectors[th.sector_idx]
+
+    if th.kind == LIGHT_STROBE
+        th.timer = th.timer + 1
+        if th.timer >= th.rate
+            th.timer = 0
+            if sec.light == th.max_light
+                sec.light = th.min_light
+            else
+                sec.light = th.max_light
+            end
+        end
+        return
+    end
+
+    if th.kind == LIGHT_GLOW
+        # Smooth ramp between min and max light. th.direction is +1/-1.
+        sec.light = sec.light + th.direction * 2
+        if sec.light <= th.min_light
+            sec.light = th.min_light
+            th.direction = 1
+        end
+        if sec.light >= th.max_light
+            sec.light = th.max_light
+            th.direction = -1
+        end
+        return
+    end
+
+    if th.kind == LIGHT_SYNC_STROBE
+        # Phase comes from a global so all sync strobes blink together
+        local on = (g_sync_strobe_phase / th.rate) % 2 == 0
+        if on
+            sec.light = th.max_light
+        else
+            sec.light = th.min_light
+        end
+        return
+    end
+
+    if th.kind == LIGHT_FIRE
+        # Vanilla "fire flicker" — random pulses biased toward bright,
+        # with brief drops to min_light. Refreshed every ~4 tics.
+        th.timer = th.timer + 1
+        if th.timer >= 4
+            th.timer = 0
+            local amt = floor(rand() * (th.max_light - th.min_light))
+            local v   = th.max_light - amt
+            if v < th.min_light
+                v = th.min_light
+            end
+            sec.light = v
+        end
+        return
+    end
+end
+
+function specials_close_door_tag(tag, speed)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            local th = {}
+            th.type       = THINK_DOOR
+            th.active     = true
+            th.sector_idx = i
+            th.speed      = speed
+            th.state      = DOOR_CLOSING
+            th.wait_tics  = -1
+            th.timer      = 0
+            th.top_h      = sec.ceil_h
+            th.bottom_h   = sec.floor_h
+            audio_play_sfx(SFX_DORCLS)
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+        end
+    end
+end
+
+# Floor to highest neighbor (vanilla calls this "lower floor to highest")
+function specials_highest_floor_neighbor(sector_idx)
+    if map_data == none
+        return 0
+    end
+    local highest = -32768
+    for i in range(map_data.linedefs_count):
+        local ld = map_data.linedefs[i]
+        if ld.front >= 0 and ld.back >= 0
+            local fs = map_data.sidedefs[ld.front].sector
+            local bs = map_data.sidedefs[ld.back].sector
+            if fs == sector_idx
+                local h = map_data.sectors[bs].floor_h
+                if h > highest
+                    highest = h
+                end
+            end
+            if bs == sector_idx
+                local h = map_data.sectors[fs].floor_h
+                if h > highest
+                    highest = h
+                end
+            end
+        end
+    end
+    if highest == -32768
+        return map_data.sectors[sector_idx].floor_h
+    end
+    return highest
+end
+
+function specials_floor_to_highest_tag(tag)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            local th = {}
+            th.type       = THINK_FLOOR
+            th.active     = true
+            th.sector_idx = i
+            th.speed      = FLOOR_SPEED
+            th.direction  = -1
+            th.target_h   = specials_highest_floor_neighbor(i)
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+        end
+    end
+end
+
+# Raise (delta>0) or lower (delta<0) the tagged sector floor by `delta` units.
+function specials_floor_by_tag(tag, delta)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            local th = {}
+            th.type       = THINK_FLOOR
+            th.active     = true
+            th.sector_idx = i
+            th.speed      = FLOOR_SPEED
+            if delta >= 0
+                th.direction = 1
+            else
+                th.direction = -1
+            end
+            th.target_h   = sec.floor_h + delta
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+        end
+    end
+end
+
+# Raise tagged sector floor up to lowest neighbor ceiling
+function specials_floor_to_lowest_ceil_tag(tag)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            local th = {}
+            th.type       = THINK_FLOOR
+            th.active     = true
+            th.sector_idx = i
+            th.speed      = FLOOR_SPEED
+            th.direction  = 1
+            th.target_h   = specials_lowest_ceil_neighbor(i)
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+        end
+    end
+end
+
+# Lower tagged sector ceiling down to its floor (used by 41/43)
+function specials_ceil_to_floor_tag(tag)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.tag == tag
+            local th = {}
+            th.type       = THINK_DOOR
+            th.active     = true
+            th.sector_idx = i
+            th.speed      = DOOR_SPEED
+            th.state      = DOOR_CLOSING
+            th.wait_tics  = -1
+            th.timer      = 0
+            th.top_h      = sec.ceil_h
+            th.bottom_h   = sec.floor_h
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+        end
+    end
+end
+
+function specials_lowest_floor_neighbor(sector_idx)
+    if map_data == none
+        return 0
+    end
+    local lowest = map_data.sectors[sector_idx].floor_h
+    for i in range(map_data.linedefs_count):
+        local ld = map_data.linedefs[i]
+        if ld.front >= 0 and ld.back >= 0
+            local fs = map_data.sidedefs[ld.front].sector
+            local bs = map_data.sidedefs[ld.back].sector
+            if fs == sector_idx
+                local h = map_data.sectors[bs].floor_h
+                if h < lowest
+                    lowest = h
+                end
+            end
+            if bs == sector_idx
+                local h = map_data.sectors[fs].floor_h
+                if h < lowest
+                    lowest = h
+                end
+            end
+        end
+    end
+    return lowest
+end
+
+function specials_lowest_ceil_neighbor(sector_idx)
+    if map_data == none
+        return 32767
+    end
+    local lowest = 32767
+    for i in range(map_data.linedefs_count):
+        local ld = map_data.linedefs[i]
+        if ld.front >= 0 and ld.back >= 0
+            local fs = map_data.sidedefs[ld.front].sector
+            local bs = map_data.sidedefs[ld.back].sector
+            if fs == sector_idx
+                local h = map_data.sectors[bs].ceil_h
+                if h < lowest
+                    lowest = h
+                end
+            end
+            if bs == sector_idx
+                local h = map_data.sectors[fs].ceil_h
+                if h < lowest
+                    lowest = h
+                end
+            end
+        end
+    end
+    return lowest
+end
+
+function specials_next_higher_floor(sector_idx)
+    if map_data == none
+        return 0
+    end
+    local cur = map_data.sectors[sector_idx].floor_h
+    local best = 32767
+    for i in range(map_data.linedefs_count):
+        local ld = map_data.linedefs[i]
+        if ld.front >= 0 and ld.back >= 0
+            local fs = map_data.sidedefs[ld.front].sector
+            local bs = map_data.sidedefs[ld.back].sector
+            if fs == sector_idx
+                local h = map_data.sectors[bs].floor_h
+                if h > cur and h < best
+                    best = h
+                end
+            end
+            if bs == sector_idx
+                local h = map_data.sectors[fs].floor_h
+                if h > cur and h < best
+                    best = h
+                end
+            end
+        end
+    end
+    if best == 32767
+        return cur
+    end
+    return best
+end
+
+function specials_init_lights()
+    if map_data == none
+        return
+    end
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        local sp = sec.special
+        local th = none
+        # 1: random flicker (fast strobe with random rate)
+        # 2: strobe fast
+        # 3: strobe slow
+        # 8: glow
+        # 12: strobe slow sync
+        # 13: strobe fast sync
+        # 17: fire flicker
+        if sp == 1 or sp == 2 or sp == 3
+            th = {}
+            th.kind = LIGHT_STROBE
+            if sp == 1
+                th.rate = 8 + floor(rand() * 16)
+            elif sp == 2
+                th.rate = 4
+            else
+                th.rate = 15
+            end
+        elif sp == 8
+            th = {}
+            th.kind = LIGHT_GLOW
+            th.direction = -1
+        elif sp == 12 or sp == 13
+            th = {}
+            th.kind = LIGHT_SYNC_STROBE
+            if sp == 13
+                th.rate = 5
+            else
+                th.rate = 15
+            end
+        elif sp == 17
+            th = {}
+            th.kind = LIGHT_FIRE
+        end
+        if th != none
+            th.type       = THINK_LIGHT
+            th.active     = true
+            th.sector_idx = i
+            th.max_light  = sec.light
+            th.min_light  = specials_min_light_neighbor(i)
+            th.timer      = 0
+            sp_thinkers[format("{}", sp_think_count)] = th
+            sp_think_count = sp_think_count + 1
+        end
+    end
+end
+
+function specials_min_light_neighbor(sector_idx)
+    if map_data == none
+        return 0
+    end
+    local min_l = map_data.sectors[sector_idx].light
+    for i in range(map_data.linedefs_count):
+        local ld = map_data.linedefs[i]
+        if ld.front >= 0 and ld.back >= 0
+            local fs = map_data.sidedefs[ld.front].sector
+            local bs = map_data.sidedefs[ld.back].sector
+            if fs == sector_idx
+                local l = map_data.sectors[bs].light
+                if l < min_l
+                    min_l = l
+                end
+            end
+            if bs == sector_idx
+                local l = map_data.sectors[fs].light
+                if l < min_l
+                    min_l = l
+                end
+            end
+        end
+    end
+    return min_l
+end
+
+# -- Walk-line crossing triggers ----------------------------------------
+
+function _line_side(ld, x, y)
+    local v1 = map_data.vertices[ld.v1]
+    local v2 = map_data.vertices[ld.v2]
+    local cross = (v2.x - v1.x) * (y - v1.y) - (v2.y - v1.y) * (x - v1.x)
+    if cross > 0
+        return 1
+    end
+    if cross < 0
+        return -1
+    end
+    return 0
+end
+
+function specials_teleport_to(tag)
+    if map_data == none
+        return
+    end
+    local target_sec = -1
+    for i in range(map_data.sectors_count):
+        if map_data.sectors[i].tag == tag and target_sec < 0
+            target_sec = i
+        end
+    end
+    if target_sec < 0
+        return
+    end
+    for i in range(things_count):
+        local th = things_active[format("{}", i)]
+        if th != none and th.type == THING_TELEDEST
+            local ss = map_find_subsector(th.x, th.y)
+            if ss >= 0 and ss < map_data.ssectors_count
+                local seg_idx = map_data.ssectors[ss].first_seg
+                if seg_idx >= 0 and seg_idx < map_data.segs_count
+                    local seg = map_data.segs[seg_idx]
+                    local ldef = map_data.linedefs[seg.linedef]
+                    if ldef.front >= 0
+                        local side = map_data.sidedefs[ldef.front]
+                        if side.sector == target_sec
+                            player_x = th.x
+                            player_y = th.y
+                            player_angle = th.angle * PI / 180.0
+                            audio_play_sfx("DSTELEPT")
+                            return
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+# Walk-trigger linedef specials we know how to handle. W1 = single-use
+# (set in g_w1_used and never refires), WR = repeatable. Each entry is
+# walked when the player crosses the line.
+function specials_is_walk_special(s)
+    # W1 / WR doors
+    if s == 2 or s == 3 or s == 4 or s == 16 or s == 75 or s == 76 or s == 86 or s == 90 or s == 105 or s == 106 or s == 107 or s == 108 or s == 109 or s == 110
+        return true
+    end
+    # W1 / WR floors
+    if s == 19 or s == 30 or s == 36 or s == 37 or s == 38 or s == 56 or s == 58 or s == 59 or s == 82 or s == 83 or s == 84 or s == 91 or s == 92 or s == 93 or s == 96 or s == 98 or s == 119 or s == 128 or s == 129 or s == 130
+        return true
+    end
+    # W1 / WR lifts and crushers
+    if s == 10 or s == 25 or s == 87 or s == 88 or s == 89 or s == 120 or s == 121
+        return true
+    end
+    # Teleport / exit
+    if s == 39 or s == 97 or s == 52 or s == 124
+        return true
+    end
+    return false
+end
+
+# Single-use walk-triggers (W1). Anything else is repeatable (WR).
+function specials_is_single_use(s)
+    if s == 2 or s == 3 or s == 4 or s == 16 or s == 19 or s == 25 or s == 30
+        return true
+    end
+    if s == 36 or s == 37 or s == 38 or s == 39 or s == 52 or s == 56 or s == 58 or s == 59
+        return true
+    end
+    if s == 108 or s == 109 or s == 110 or s == 119 or s == 121 or s == 124 or s == 130
+        return true
+    end
+    return false
+end
+
+function specials_walk_trigger(ld, idx)
+    local s = ld.special
+    local key = format("ld_{}", idx)
+    local is_w1 = specials_is_single_use(s)
+
+    if is_w1 and g_w1_used[key] == true
+        return
+    end
+
+    # Doors
+    if s == 2 or s == 86
+        specials_open_door_tag(ld.tag, DOOR_SPEED, -1)
+    elif s == 3 or s == 75
+        specials_close_door_tag(ld.tag, DOOR_SPEED)
+    elif s == 4 or s == 90
+        specials_open_door_tag(ld.tag, DOOR_SPEED, DOOR_WAIT)
+    elif s == 16 or s == 76
+        # "Close door for 30 seconds" — we model as plain close
+        specials_close_door_tag(ld.tag, DOOR_SPEED)
+    elif s == 109 or s == 105
+        specials_open_door_tag(ld.tag, DOOR_SPEED * 4, -1)
+    elif s == 108 or s == 106
+        specials_open_door_tag(ld.tag, DOOR_SPEED * 4, DOOR_WAIT)
+    elif s == 110 or s == 107
+        specials_close_door_tag(ld.tag, DOOR_SPEED * 4)
+    # Floors lower
+    elif s == 19 or s == 83
+        specials_floor_to_highest_tag(ld.tag)
+    elif s == 36 or s == 70 or s == 98
+        # "Lower 8 above highest" — we approximate with floor-to-highest
+        specials_floor_to_highest_tag(ld.tag)
+    elif s == 37 or s == 84
+        specials_floor_to_highest_tag(ld.tag)
+    elif s == 38 or s == 82
+        specials_lower_floor_tag(ld.tag)
+    # Floors raise
+    elif s == 30 or s == 91
+        specials_floor_to_lowest_ceil_tag(ld.tag)
+    elif s == 56 or s == 96
+        specials_floor_to_lowest_ceil_tag(ld.tag)
+    elif s == 58 or s == 92
+        specials_floor_by_tag(ld.tag, 24)
+    elif s == 59 or s == 93
+        specials_floor_by_tag(ld.tag, 24)
+    elif s == 119 or s == 128
+        specials_raise_floor_tag(ld.tag)
+    elif s == 129 or s == 130
+        specials_raise_floor_tag(ld.tag)
+    # Lifts and crushers
+    elif s == 10 or s == 88 or s == 87 or s == 120 or s == 121
+        specials_plat_tag(ld.tag)
+    elif s == 25 or s == 89
+        # Crusher — we don't have a dedicated crusher, treat as ceiling lower
+        specials_ceil_to_floor_tag(ld.tag)
+    # Teleport / exit
+    elif s == 39 or s == 97
+        specials_teleport_to(ld.tag)
+    elif s == 52
+        game_exit_level()
+    elif s == 124
+        g_secret_exit = true
+        game_exit_level()
+    end
+
+    if is_w1
+        g_w1_used[key] = true
+    end
+end
+
+# Player crossed from (px,py) to (nx,ny) — fire any walk-trigger linedefs
+function specials_walk_check(px, py, nx, ny)
+    if map_data == none
+        return
+    end
+    for i in range(map_data.linedefs_count):
+        local ld = map_data.linedefs[i]
+        if specials_is_walk_special(ld.special)
+            local prev_side = _line_side(ld, px, py)
+            local cur_side  = _line_side(ld, nx, ny)
+            if prev_side != cur_side and prev_side != 0
+                # Bounding box of the segment, padded slightly
+                local v1 = map_data.vertices[ld.v1]
+                local v2 = map_data.vertices[ld.v2]
+                local minx = min(v1.x, v2.x) - 16
+                local maxx = max(v1.x, v2.x) + 16
+                local miny = min(v1.y, v2.y) - 16
+                local maxy = max(v1.y, v2.y) + 16
+                if nx >= minx and nx <= maxx and ny >= miny and ny <= maxy
+                    specials_walk_trigger(ld, i)
+                end
+            end
+        end
+    end
+end

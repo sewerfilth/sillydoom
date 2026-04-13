@@ -1,0 +1,858 @@
+# player.is — Player movement, collision, controls
+#
+# Switch controller mapping (from platform_switch.c):
+#   D-pad / Left stick -> WASD/Arrows (movement)
+#   A button -> Space (use/open door)
+#   ZR (X key) -> Fire
+#   ZL (Z key) -> Automap
+#   L shoulder (Q) -> Prev weapon
+#   R shoulder (E) -> Next weapon
+#   Plus -> Escape (menu)
+#   Minus (F1) -> Toggle HUD
+
+PI  = 3.14159265358979
+TAU = 6.28318530717959
+
+player_x     = 0
+player_y     = 0
+player_z     = 41
+player_angle = 0
+player_vx    = 0
+player_vy    = 0
+player_health = 100
+player_armor  = 0
+# 1 = green security armor (1/3 absorb), 2 = blue mega armor (1/2 absorb).
+# 0 means no armor (player_armor will be 0 too).
+player_armor_type = 0
+player_weapon = 1
+player_ammo = {}
+player_ammo.clip = 50
+player_ammo.shell = 0
+player_ammo.rocket = 0
+player_ammo.cell = 0
+
+player_max_ammo = {}
+player_max_ammo.clip = 200
+player_max_ammo.shell = 50
+player_max_ammo.rocket = 50
+player_max_ammo.cell = 300
+
+player_backpack = false
+
+player_keys = {}
+player_keys.blue = false
+player_keys.yellow = false
+
+player_secrets_found = {}
+player_keys.red = false
+player_dead   = false
+player_damageflash = 0
+
+# Owned weapons table — keyed by WPN_* index as a string
+player_weapons = {}
+
+# Powerup timers (35 ticks/sec). 0 = inactive
+PWR_INVULN_TIME  = 1050   # 30 seconds
+PWR_INVIS_TIME   = 2100   # 60 seconds
+PWR_RAD_TIME     = 2100   # 60 seconds
+PWR_LIGHT_TIME   = 4200   # 120 seconds
+player_invuln_tics  = 0
+player_invis_tics   = 0
+player_radsuit_tics = 0
+player_lightamp_tics = 0
+player_berserk      = false
+# Fading red overlay shown when berserk is picked up. Vanilla pulses
+# the red palette ramp for ~140 tics. Counts down each tick.
+player_berserk_tic  = 0
+# Fading gold overlay for normal item pickups (any TF_PICKUP). Vanilla
+# uses palette rows 9-12 (the gold range) for ~7 tics per pickup. We
+# stipple the same colour for ~10 tics.
+player_bonus_tic    = 0
+# "Just killed something" tic — drives the evil grin face for ~35 tics.
+player_evil_tic     = 0
+player_automap_full = false
+
+# Damage/explosion view kick — drives screen shake
+player_view_kick_x = 0.0
+player_view_kick_y = 0.0
+player_view_kick_tics = 0
+
+PLAYER_SPEED    = 6.0
+PLAYER_TURNSPD  = 0.05
+PLAYER_RADIUS   = 16
+PLAYER_HEIGHT   = 56
+PLAYER_USE_DIST = 64
+
+function player_spawn(x, y, angle)
+    player_x     = x
+    player_y     = y
+    player_angle = angle * PI / 180.0
+    player_vx    = 0
+    player_vy    = 0
+    player_health = 100
+    player_armor  = 0
+    player_armor_type = 0
+    player_weapon = 1
+    player_ammo = {}
+    player_ammo.clip = 50
+    player_ammo.shell = 0
+    player_ammo.rocket = 0
+    player_ammo.cell = 0
+    player_backpack = false
+    player_max_ammo.clip = 200
+    player_max_ammo.shell = 50
+    player_max_ammo.rocket = 50
+    player_max_ammo.cell = 300
+    player_keys = {}
+    player_keys.blue = false
+    player_keys.yellow = false
+    player_keys.red = false
+    player_dead   = false
+    player_damageflash = 0
+    player_secrets_found = {}
+    # Default loadout: fist + pistol only
+    player_weapons = {}
+    player_weapons["0"] = true   # WPN_FIST
+    player_weapons["1"] = true   # WPN_PISTOL
+    # Powerups cleared
+    player_invuln_tics  = 0
+    player_invis_tics   = 0
+    player_radsuit_tics = 0
+    player_lightamp_tics = 0
+    player_berserk      = false
+    player_berserk_tic  = 0
+    player_bonus_tic    = 0
+    player_evil_tic     = 0
+    player_automap_full = false
+    # View kick reset
+    player_view_kick_x = 0.0
+    player_view_kick_y = 0.0
+    player_view_kick_tics = 0
+end
+
+function player_has_weapon(idx)
+    return player_weapons[format("{}", idx)] == true
+end
+
+function player_give_weapon(idx)
+    local key = format("{}", idx)
+    local was_new = player_weapons[key] != true
+    player_weapons[key] = true
+    # Auto-switch to newly picked up weapon (vanilla behaviour)
+    if was_new
+        player_weapon = idx
+    end
+end
+
+# Step the current weapon by `dir` (+1 = next, -1 = prev), wrapping
+# 0..7 and skipping unowned slots. No-op if no other weapon is owned.
+function player_cycle_weapon(dir)
+    local nxt = player_weapon
+    local guard = 0
+    while guard < 8
+        nxt = nxt + dir
+        if nxt < 0
+            nxt = 7
+        end
+        if nxt > 7
+            nxt = 0
+        end
+        if player_has_weapon(nxt)
+            player_weapon = nxt
+            return
+        end
+        guard = guard + 1
+    end
+end
+
+function player_has_key(color)
+    if color == "blue"
+        return player_keys.blue
+    end
+    if color == "yellow"
+        return player_keys.yellow
+    end
+    if color == "red"
+        return player_keys.red
+    end
+    return false
+end
+
+function player_give_key(color)
+    if color == "blue"
+        player_keys.blue = true
+    end
+    if color == "yellow"
+        player_keys.yellow = true
+    end
+    if color == "red"
+        player_keys.red = true
+    end
+end
+
+# -- Input ------------------------------------------------------------
+
+player_cmd_forward  = 0
+player_cmd_strafe   = 0
+player_cmd_turn     = 0
+player_cmd_fire     = false
+player_cmd_use      = false
+
+function player_read_input()
+    player_cmd_forward = 0
+    player_cmd_strafe  = 0
+    player_cmd_turn    = 0
+    player_cmd_fire    = false
+    player_cmd_use     = false
+
+    if player_dead
+        return
+    end
+
+    # Forward/back: W/S always; Up/Down only when automap isn't grabbing
+    # the arrow keys for panning.
+    if keyPressed(KEY_W)
+        player_cmd_forward = player_cmd_forward + 1
+    end
+    if keyPressed(KEY_S)
+        player_cmd_forward = player_cmd_forward - 1
+    end
+    if not automap_on
+        if keyPressed(KEY_UP)
+            player_cmd_forward = player_cmd_forward + 1
+        end
+        if keyPressed(KEY_DOWN)
+            player_cmd_forward = player_cmd_forward - 1
+        end
+    end
+
+    # Strafe: A/D (D-pad Left/Right on Switch)
+    if keyPressed(KEY_A)
+        player_cmd_strafe = player_cmd_strafe - 1
+    end
+    if keyPressed(KEY_D)
+        player_cmd_strafe = player_cmd_strafe + 1
+    end
+
+    # Turn: Left/Right arrows (when automap isn't using them to pan), or mouse
+    if not automap_on
+        if keyPressed(KEY_LEFT)
+            player_cmd_turn = player_cmd_turn + 1
+        end
+        if keyPressed(KEY_RIGHT)
+            player_cmd_turn = player_cmd_turn - 1
+        end
+    end
+
+    # Fire: Ctrl or mouse left or ZR (mapped to X key on Switch)
+    # Fire: Mouse left (desktop) or ZR (KEY_X on Switch)
+    if mouseButton(MOUSE_LEFT) or keyPressed(KEY_X)
+        player_cmd_fire = true
+    end
+
+    # Use: Space (A button on Switch)
+    if keyJustPressed(KEY_SPACE)
+        player_cmd_use = true
+    end
+
+    # Weapon select: number keys 1-7 (only if owned)
+    local i = 1
+    while i <= 7
+        if keyJustPressed(KEY_0 + i)
+            if player_has_weapon(i)
+                player_weapon = i
+            end
+        end
+        i = i + 1
+    end
+
+    # Weapon cycle: Q = prev, E = next (skips unowned slots)
+    if keyJustPressed(KEY_Q)
+        player_cycle_weapon(-1)
+    end
+    if keyJustPressed(KEY_E)
+        player_cycle_weapon(1)
+    end
+
+    # Mouse look (desktop only — no-op on Switch)
+    # Sensitivity scales 0..9 from the options menu. The base factor at
+    # sens=5 matches the original 0.003 default; each step is +/-15%.
+    local mdx = mouseDeltaX()
+    local sens_factor = 0.003 * (1.0 + (opt_mouse_sens - 5) * 0.15)
+    if sens_factor < 0.0005
+        sens_factor = 0.0005
+    end
+    player_cmd_turn = player_cmd_turn - mdx * sens_factor
+end
+
+# -- Tick -------------------------------------------------------------
+
+function player_tick()
+    if player_dead
+        return
+    end
+
+    if player_damageflash > 0
+        player_damageflash = player_damageflash - 1
+    end
+
+    # Powerup timers tick down
+    if player_invuln_tics > 0
+        player_invuln_tics = player_invuln_tics - 1
+    end
+    if player_invis_tics > 0
+        player_invis_tics = player_invis_tics - 1
+    end
+    if player_radsuit_tics > 0
+        player_radsuit_tics = player_radsuit_tics - 1
+    end
+    if player_lightamp_tics > 0
+        player_lightamp_tics = player_lightamp_tics - 1
+    end
+    if player_berserk_tic > 0
+        player_berserk_tic = player_berserk_tic - 1
+    end
+    if player_bonus_tic > 0
+        player_bonus_tic = player_bonus_tic - 1
+    end
+    if player_evil_tic > 0
+        player_evil_tic = player_evil_tic - 1
+    end
+
+    # Decay view kick
+    if player_view_kick_tics > 0
+        player_view_kick_x = player_view_kick_x * 0.7
+        player_view_kick_y = player_view_kick_y * 0.7
+        player_view_kick_tics = player_view_kick_tics - 1
+    else
+        player_view_kick_x = 0.0
+        player_view_kick_y = 0.0
+    end
+
+    player_angle = player_angle + player_cmd_turn * PLAYER_TURNSPD
+    while player_angle < 0
+        player_angle = player_angle + TAU
+    end
+    while player_angle >= TAU
+        player_angle = player_angle - TAU
+    end
+
+    local forward_x = cos(player_angle) * player_cmd_forward * PLAYER_SPEED
+    local forward_y = sin(player_angle) * player_cmd_forward * PLAYER_SPEED
+    # Strafe RIGHT = angle - 90°, not +90°. The +90° version was strafe
+    # LEFT — it was only tolerated before because the entire render was
+    # horizontally mirrored, which visually flipped the strafe direction
+    # back. Now that the mirror is fixed, strafe needs its own sign fix.
+    local strafe_x  = cos(player_angle - PI / 2) * player_cmd_strafe * PLAYER_SPEED
+    local strafe_y  = sin(player_angle - PI / 2) * player_cmd_strafe * PLAYER_SPEED
+
+    local move_x = forward_x + strafe_x
+    local move_y = forward_y + strafe_y
+
+    local prev_x = player_x
+    local prev_y = player_y
+
+    # Collision via C blockmap. The 5th/6th args (old pos) enable a
+    # crossing check so the step-up test only fires when actually
+    # crossing a linedef, not when standing NEAR one. Without this,
+    # falling off a >24-unit step traps the player because every
+    # nearby linedef blocks all movement.
+    local cur_floor = player_z - 41
+    if doomCollide(player_x + move_x, player_y, PLAYER_RADIUS, cur_floor, player_x, player_y)
+        player_x = player_x + move_x
+    end
+    if doomCollide(player_x, player_y + move_y, PLAYER_RADIUS, cur_floor, player_x, player_y)
+        player_y = player_y + move_y
+    end
+
+    # Walk-line triggers (teleports, walk-exits)
+    if prev_x != player_x or prev_y != player_y
+        specials_walk_check(prev_x, prev_y, player_x, player_y)
+    end
+
+    # Floor height from C BSP lookup
+    player_z = doomFloorHeight(player_x, player_y) + 41
+
+    # Secret sector discovery (still isilly — reads map_data tables)
+    local ss = none
+    if map_data != none
+        ss = map_find_subsector(player_x, player_y)
+        if ss >= 0 and ss < map_data.ssectors_count
+            local seg_idx = map_data.ssectors[ss].first_seg
+            if seg_idx >= 0 and seg_idx < map_data.segs_count
+                local seg = map_data.segs[seg_idx]
+                local ld = map_data.linedefs[seg.linedef]
+                if ld.front >= 0
+                    local side = map_data.sidedefs[ld.front]
+                    local sec = map_data.sectors[side.sector]
+                    if sec.special == 9
+                        local sec_key = format("sec_{}", side.sector)
+                        if player_secrets_found[sec_key] != true
+                            player_secrets_found[sec_key] = true
+                            g_secret_count = g_secret_count + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    # Damage floors (nukage, lava, etc.) — radsuit blocks all damage floors
+    if map_data != none and player_radsuit_tics <= 0
+        if ss >= 0 and ss < map_data.ssectors_count
+            local seg_idx2 = map_data.ssectors[ss].first_seg
+            if seg_idx2 >= 0 and seg_idx2 < map_data.segs_count
+                local seg2 = map_data.segs[seg_idx2]
+                local ld2 = map_data.linedefs[seg2.linedef]
+                if ld2.front >= 0
+                    local side2 = map_data.sidedefs[ld2.front]
+                    local sec2 = map_data.sectors[side2.sector]
+                    # Sector type damage: 5=10dmg, 7=5dmg, 4=20dmg+end, 11=20dmg, 16=20dmg
+                    if sec2.special == 5 and g_tic_count % 32 == 0
+                        player_take_damage(10)
+                    end
+                    if sec2.special == 7 and g_tic_count % 32 == 0
+                        player_take_damage(5)
+                    end
+                    if sec2.special == 4 and g_tic_count % 32 == 0
+                        player_take_damage(20)
+                    end
+                    if sec2.special == 11 and g_tic_count % 32 == 0
+                        player_take_damage(20)
+                    end
+                    if sec2.special == 16 and g_tic_count % 32 == 0
+                        player_take_damage(20)
+                    end
+                end
+            end
+        end
+    end
+
+    if player_cmd_use
+        player_use()
+    end
+
+    player_check_pickups()
+end
+
+# -- Collision --------------------------------------------------------
+#
+# Wall collision goes through doomCollide (C blockmap query) — see
+# player_tick. The line/point distance helper here is only used by
+# player_use to find the linedef under the player's "use" cursor.
+
+function line_point_dist(x1, y1, x2, y2, px, py)
+    local dx = x2 - x1
+    local dy = y2 - y1
+    local len_sq = dx * dx + dy * dy
+    if len_sq == 0
+        dx = px - x1
+        dy = py - y1
+        return sqrt(dx * dx + dy * dy)
+    end
+    local t = clamp(((px - x1) * dx + (py - y1) * dy) / len_sq, 0, 1)
+    local proj_x = x1 + t * dx
+    local proj_y = y1 + t * dy
+    local ddx = px - proj_x
+    local ddy = py - proj_y
+    return sqrt(ddx * ddx + ddy * ddy)
+end
+
+# -- Use --------------------------------------------------------------
+
+# Walk a short ray forward from the player and return the first tagged
+# linedef it hits. Beats the old "closest tagged linedef to a single
+# point" approach which would happily trigger switches through walls
+# because there was no line-of-sight check.
+function player_use()
+    if map_data == none
+        return
+    end
+    local floor_h = player_z - 41
+    local step = 4
+    local steps = PLAYER_USE_DIST / step
+    local dx = cos(player_angle) * step
+    local dy = sin(player_angle) * step
+
+    local cx = player_x
+    local cy = player_y
+    local prev_x = player_x
+    local prev_y = player_y
+    local i = 0
+    local found = false
+    while i < steps and not found
+        cx = cx + dx
+        cy = cy + dy
+
+        # Stop at solid walls — anything past here is unreachable.
+        if not doomCollide(cx, cy, 1, floor_h)
+            i = steps
+        else
+            # Find a tagged linedef near the current step.
+            local hit = none
+            local best = step + 4
+            local j = 0
+            while j < map_data.linedefs_count
+                local ld = map_data.linedefs[j]
+                if ld.special != 0
+                    local v1 = map_data.vertices[ld.v1]
+                    local v2 = map_data.vertices[ld.v2]
+                    local d = line_point_dist(v1.x, v1.y, v2.x, v2.y, cx, cy)
+                    if d < best
+                        best = d
+                        hit = ld
+                    end
+                end
+                j = j + 1
+            end
+            if hit != none
+                specials_activate(hit, 0)
+                found = true
+            end
+            prev_x = cx
+            prev_y = cy
+            i = i + 1
+        end
+    end
+
+    if not found
+        audio_play_sfx(SFX_NOWAY)
+    end
+end
+
+# -- Pickups ----------------------------------------------------------
+
+function player_check_pickups()
+    for i in range(things_count):
+        local th = things_active[format("{}", i)]
+        if th != none
+            if (th.flags & TF_PICKUP) != 0 and th.health > 0
+                local dx = th.x - player_x
+                local dy = th.y - player_y
+                if dx * dx + dy * dy < 900
+                    if player_pickup(th)
+                        th.health = 0
+                        g_item_count = g_item_count + 1
+                        audio_play_sfx(SFX_ITMUP)
+                        # Gold flash for any pickup (matches vanilla
+                        # palette rows 9-12 behaviour)
+                        player_bonus_tic = 10
+                    end
+                end
+            end
+        end
+    end
+end
+
+function player_pickup(th)
+    local type = th.type
+
+    if type == THING_STIMPACK
+        if player_health >= 100
+            return false
+        end
+        player_health = min(player_health + 10, 100)
+        msg_post("Picked up a stimpack.")
+        return true
+    end
+    if type == THING_MEDIKIT
+        if player_health >= 100
+            return false
+        end
+        player_health = min(player_health + 25, 100)
+        msg_post("Picked up a medikit.")
+        return true
+    end
+    if type == THING_ARMOR_G
+        # Vanilla: green armor pickup is rejected if you already have ANY
+        # armor at >= 100 (so a green can't replace blue mega armor).
+        if player_armor >= 100
+            return false
+        end
+        player_armor = 100
+        player_armor_type = 1
+        msg_post("Picked up the armor.")
+        return true
+    end
+    if type == THING_ARMOR_B
+        if player_armor >= 200
+            return false
+        end
+        player_armor = 200
+        player_armor_type = 2
+        msg_post("Picked up the MegaArmor!")
+        return true
+    end
+    if type == THING_SHOTGUN
+        player_give_weapon(WPN_SHOTGUN)
+        player_give_ammo("shell", 8)
+        msg_post("You got the shotgun!")
+        return true
+    end
+    if type == THING_CHAINGUN
+        player_give_weapon(WPN_CHAINGUN)
+        player_give_ammo("clip", 20)
+        msg_post("You got the chaingun!")
+        return true
+    end
+    if type == THING_LAUNCHER
+        player_give_weapon(WPN_LAUNCHER)
+        player_give_ammo("rocket", 2)
+        msg_post("You got the rocket launcher!")
+        return true
+    end
+    if type == THING_PLASMA
+        player_give_weapon(WPN_PLASMA)
+        player_give_ammo("cell", 40)
+        msg_post("You got the plasma gun!")
+        return true
+    end
+    if type == THING_BFG
+        player_give_weapon(WPN_BFG)
+        player_give_ammo("cell", 40)
+        msg_post("You got the BFG9000!  Oh, yes.")
+        return true
+    end
+    if type == THING_CHAINSAW
+        player_give_weapon(WPN_CHAINSAW)
+        msg_post("A chainsaw!  Find some meat!")
+        return true
+    end
+    if type == THING_BLUE_KEY
+        player_give_key("blue")
+        msg_post("Picked up a blue keycard.")
+        return true
+    end
+    if type == THING_YELLOW_KEY
+        player_give_key("yellow")
+        msg_post("Picked up a yellow keycard.")
+        return true
+    end
+    if type == THING_RED_KEY
+        player_give_key("red")
+        msg_post("Picked up a red keycard.")
+        return true
+    end
+    if type == THING_AMMO_CLIP
+        player_give_ammo("clip", 10)
+        msg_post("Picked up a clip.")
+        return true
+    end
+    if type == THING_AMMO_SHELL
+        player_give_ammo("shell", 4)
+        msg_post("Picked up 4 shotgun shells.")
+        return true
+    end
+    if type == THING_AMMO_ROCKET
+        player_give_ammo("rocket", 1)
+        msg_post("Picked up a rocket.")
+        return true
+    end
+    if type == THING_AMMO_CELL
+        player_give_ammo("cell", 20)
+        msg_post("Picked up an energy cell.")
+        return true
+    end
+    if type == THING_AMMO_BOX_CLIP
+        player_give_ammo("clip", 50)
+        msg_post("Picked up a box of bullets.")
+        return true
+    end
+    if type == THING_AMMO_BOX_SHELL
+        player_give_ammo("shell", 20)
+        msg_post("Picked up a box of shells.")
+        return true
+    end
+    if type == THING_AMMO_BOX_ROCKET
+        player_give_ammo("rocket", 5)
+        msg_post("Picked up a box of rockets.")
+        return true
+    end
+
+    if type == THING_HEALTH_BONUS
+        if player_health >= 200
+            return false
+        end
+        player_health = player_health + 1
+        msg_post("Picked up a health bonus.")
+        return true
+    end
+    if type == THING_ARMOR_BONUS
+        if player_armor >= 200
+            return false
+        end
+        player_armor = player_armor + 1
+        msg_post("Picked up an armor bonus.")
+        return true
+    end
+    if type == THING_SOULSPHERE
+        if player_health >= 200
+            return false
+        end
+        player_health = min(player_health + 100, 200)
+        msg_post("Supercharge!")
+        return true
+    end
+    if type == THING_MEGASPHERE
+        player_health = 200
+        player_armor  = 200
+        player_armor_type = 2  # MegaSphere grants blue armor
+        msg_post("MegaSphere!")
+        return true
+    end
+
+    if type == THING_INVULN
+        player_invuln_tics = PWR_INVULN_TIME
+        msg_post("Invulnerability!")
+        return true
+    end
+    if type == THING_BERSERK
+        player_berserk = true
+        player_berserk_tic = 140   # ~4 seconds of fading red overlay
+        if player_health < 100
+            player_health = 100
+        end
+        if player_has_weapon(WPN_FIST)
+            player_weapon = WPN_FIST
+        end
+        msg_post("Berserk!")
+        return true
+    end
+    if type == THING_INVIS
+        player_invis_tics = PWR_INVIS_TIME
+        msg_post("Partial Invisibility")
+        return true
+    end
+    if type == THING_RADSUIT
+        player_radsuit_tics = PWR_RAD_TIME
+        msg_post("Radiation Shielding Suit")
+        return true
+    end
+    if type == THING_ALLMAP
+        player_automap_full = true
+        msg_post("Computer Area Map")
+        return true
+    end
+    if type == THING_VISOR
+        player_lightamp_tics = PWR_LIGHT_TIME
+        msg_post("Light Amplification Visor")
+        return true
+    end
+    if type == THING_BACKPACK
+        if not player_backpack
+            player_backpack = true
+            player_max_ammo.clip   = 400
+            player_max_ammo.shell  = 100
+            player_max_ammo.rocket = 100
+            player_max_ammo.cell   = 600
+        end
+        # Always gives one of each ammo type on top
+        player_give_ammo("clip", 10)
+        player_give_ammo("shell", 4)
+        player_give_ammo("rocket", 1)
+        player_give_ammo("cell", 20)
+        msg_post("Picked up a backpack full of ammo!")
+        return true
+    end
+    if type == THING_AMMO_BOX_CELL
+        player_give_ammo("cell", 100)
+        msg_post("Picked up an energy cell pack.")
+        return true
+    end
+
+    return false
+end
+
+# -- Damage -----------------------------------------------------------
+
+function player_kick_view(magnitude)
+    # Apply random kick — bigger hits shake more, capped to ±8 units
+    local m = magnitude
+    if m > 8
+        m = 8
+    end
+    player_view_kick_x = (rand() - 0.5) * m * 2
+    player_view_kick_y = (rand() - 0.5) * m * 2
+    player_view_kick_tics = 8
+end
+
+function player_take_damage(amount)
+    if player_dead
+        return
+    end
+
+    # Invulnerability sphere — no damage at all
+    if player_invuln_tics > 0
+        return
+    end
+
+    # Skill scaling: ITYTD halves incoming damage. Vanilla Nightmare
+    # does NOT double damage taken — its difficulty comes from monster
+    # rate-of-fire and respawn, both handled elsewhere.
+    local skill = game_skill()
+    if skill == SKILL_ITYTD
+        amount = floor(amount / 2)
+    end
+    if amount <= 0
+        return
+    end
+
+    player_kick_view(amount * 0.4)
+
+    if player_armor > 0
+        # Green armor (type 1) absorbs 1/3, blue mega armor (type 2)
+        # absorbs 1/2. Anything unset defaults to green-style.
+        local absorbed
+        if player_armor_type == 2
+            absorbed = floor(amount / 2)
+        else
+            absorbed = floor(amount / 3)
+        end
+        if absorbed > player_armor
+            absorbed = player_armor
+        end
+        player_armor = player_armor - absorbed
+        if player_armor <= 0
+            player_armor_type = 0
+        end
+        amount = amount - absorbed
+    end
+
+    player_health = player_health - amount
+    player_damageflash = 8
+
+    if player_health <= 0
+        player_health = 0
+        player_dead = true
+        audio_play_sfx(SFX_PLDETH)
+    else
+        # Pain sound — vanilla plays DSPLPAIN; DSOOF for tiny chip damage
+        if amount < 10
+            audio_play_sfx(SFX_OOF)
+        else
+            audio_play_sfx("DSPLPAIN")
+        end
+    end
+end
+
+# Ammo pickup multiplier — ITYTD and Nightmare give double ammo
+function player_ammo_mult()
+    local skill = game_skill()
+    if skill == SKILL_ITYTD or skill == SKILL_NM
+        return 2
+    end
+    return 1
+end
+
+function player_give_ammo(key, amount)
+    local total = amount * player_ammo_mult()
+    local cap = player_max_ammo[key]
+    if cap == none
+        return
+    end
+    local cur = player_ammo[key]
+    if cur == none
+        cur = 0
+    end
+    player_ammo[key] = min(cur + total, cap)
+end

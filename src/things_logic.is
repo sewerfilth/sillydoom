@@ -1,0 +1,447 @@
+# things_logic.is — thing_spawn + runtime logic
+
+# Nightmare respawn queue. Vanilla nightmare respawns dead monsters
+# every 12 seconds (~420 tics at 35hz). Entries are dicts with
+# {type, x, y, angle, tics}.
+g_respawn_queue = {}
+g_respawn_count = 0
+RESPAWN_TICS    = 420
+
+function respawn_clear()
+    g_respawn_queue = {}
+    g_respawn_count = 0
+end
+
+function respawn_queue_add(type, x, y, angle)
+    local r = {}
+    r.type  = type
+    r.x     = x
+    r.y     = y
+    r.angle = angle
+    r.tics  = 0
+    g_respawn_queue[format("{}", g_respawn_count)] = r
+    g_respawn_count = g_respawn_count + 1
+end
+
+function respawn_tick()
+    if game_skill() != SKILL_NM
+        return
+    end
+    for i in range(g_respawn_count):
+        local r = g_respawn_queue[format("{}", i)]
+        if r != none
+            r.tics = r.tics + 1
+            if r.tics >= RESPAWN_TICS
+                thing_spawn(r.type, r.x, r.y, 0, r.angle)
+                g_respawn_queue[format("{}", i)] = none
+            end
+        end
+    end
+end
+
+function thing_spawn(type, x, y, z, angle)
+    local th = {}
+    th.idx     = things_count
+    th.type    = type
+    th.x       = x
+    th.y       = y
+    # Sit the thing on the floor at its spawn point. Floaters
+    # (Caco / Lost Soul) hover at floor + 32. Caller-supplied z
+    # only wins if non-zero (used by missiles which spawn mid-air).
+    if z != 0
+        th.z = z
+    else
+        local floor_h = doomFloorHeight(x, y)
+        if thing_floats(type)
+            th.z = floor_h + 32
+        else
+            th.z = floor_h
+        end
+    end
+    th.height  = thing_default_height(type)
+    th.angle   = angle * PI / 180.0
+    th.health  = thing_default_health(type)
+    th.ai      = AI_IDLE
+    th.tics    = 0
+    th.flags   = thing_default_flags(type)
+    th.speed   = thing_default_speed(type)
+    th.radius  = thing_default_radius(type)
+    th.damage  = thing_default_damage(type)
+    th.pain_chance = thing_default_pain(type)
+    th.see_dist    = 1024
+    th.attack_dist = thing_attack_dist(type)
+    th.target_idx  = -1     # -1 = target the player
+    th.vx      = 0
+    th.vy      = 0
+
+    # Nightmare: monsters move at double speed
+    if (th.flags & TF_MONSTER) != 0 and game_skill() == SKILL_NM
+        th.speed = th.speed * 2
+    end
+
+    things_active[format("{}", things_count)] = th
+    things_count = things_count + 1
+    return th
+end
+
+# Resolve a monster's current target position. Falls back to player.
+function thing_target_pos(th)
+    local pos = {}
+    if th.target_idx >= 0
+        local tgt = things_active[format("{}", th.target_idx)]
+        if tgt != none and tgt.health > 0
+            pos.x = tgt.x
+            pos.y = tgt.y
+            pos.is_monster = true
+            return pos
+        end
+        # Target dead/gone — revert to player
+        th.target_idx = -1
+    end
+    pos.x = player_x
+    pos.y = player_y
+    pos.is_monster = false
+    return pos
+end
+
+function thing_appears_at_skill(flags, skill)
+    if (flags & MTF_MULTI) != 0
+        return false
+    end
+    if skill <= 2
+        return (flags & MTF_EASY) != 0
+    end
+    if skill == 3
+        return (flags & MTF_NORMAL) != 0
+    end
+    return (flags & MTF_HARD) != 0
+end
+
+function things_spawn_map()
+    things_active = {}
+    things_count  = 0
+
+    if map_data == none
+        return
+    end
+    local skill = game_skill()
+    for i in range(map_data.things_count):
+        local mt = map_data.things[i]
+        if mt.type == THING_PLAYER1
+            # Player start ignores skill flags
+            player_spawn(mt.x, mt.y, mt.angle)
+        else
+            # Skip map metadata that has no sprite/AI:
+            #   2,3,4  = coop player starts
+            #   11     = deathmatch start
+            #   14     = teleport destination
+            local is_meta = (mt.type == THING_PLAYER2 or
+                             mt.type == THING_PLAYER3 or
+                             mt.type == THING_PLAYER4 or
+                             mt.type == 11 or
+                             mt.type == 14)
+            if not is_meta
+                if thing_appears_at_skill(mt.flags, skill)
+                    thing_spawn(mt.type, mt.x, mt.y, 0, mt.angle)
+                end
+            end
+        end
+    end
+    print(format("Things: {} spawned (skill {})", things_count, skill))
+end
+
+function thing_check_sight(th)
+    local tgt = thing_target_pos(th)
+    local dx = tgt.x - th.x
+    local dy = tgt.y - th.y
+    local dist = sqrt(dx * dx + dy * dy)
+    if dist == 0
+        return true
+    end
+
+    local steps = int(dist / 64)
+    if steps < 2
+        steps = 2
+    end
+    local sx = dx / steps
+    local sy = dy / steps
+
+    local cx = th.x
+    local cy = th.y
+    for i in range(steps):
+        cx = cx + sx
+        cy = cy + sy
+        local ss = map_find_subsector(cx, cy)
+        if ss < 0 or ss >= map_data.ssectors_count
+            return false
+        end
+    end
+    return true
+end
+
+# Monster fireball sprite by firer type. Vanilla mobjinfo:
+#   Imp     → BAL1 (TROOA1 fireball)
+#   Caco    → BAL2
+#   Baron   → BAL7
+# Anything else falls back to MISL so the missile is at least visible.
+function _monster_missile_sprite(type)
+    local t = thing_base_type(type)
+    if t == THING_IMP
+        return "BAL1"
+    end
+    if t == THING_CACO
+        return "BAL2"
+    end
+    if t == THING_BARON
+        return "BAL7"
+    end
+    return "MISL"
+end
+
+function thing_fire_missile(th)
+    local tgt = thing_target_pos(th)
+    local angle = atan2(tgt.y - th.y, tgt.x - th.x)
+    local mx = th.x + cos(angle) * 32
+    local my = th.y + sin(angle) * 32
+
+    local proj = thing_spawn(0, mx, my, th.z + 32, angle * 180 / PI)
+    proj.flags  = TF_MISSILE
+    proj.health = 1
+    proj.vx     = cos(angle) * 15
+    proj.vy     = sin(angle) * 15
+    proj.damage = th.damage
+    proj.splash = 0
+    proj.from_player = false
+    proj.firer_idx   = th.idx
+    proj.firer_type  = th.type
+    # Without this the renderer asks for sprite of type=0 and gets ""
+    # → "(empty)" sprite miss → invisible fireballs.
+    proj.sprite_pfx  = _monster_missile_sprite(th.type)
+end
+
+function thing_missile_splash(th)
+    local r = th.splash
+    if r <= 0
+        return
+    end
+    local damage = th.damage
+    # Damage the player
+    local pdx = player_x - th.x
+    local pdy = player_y - th.y
+    local pdist = sqrt(pdx * pdx + pdy * pdy)
+    if pdist < r
+        local dmg = damage * (1.0 - pdist / r)
+        if dmg > 0
+            player_take_damage(floor(dmg))
+        end
+    end
+    # Damage nearby things
+    for i in range(things_count):
+        local other = things_active[format("{}", i)]
+        if other != none
+            if other.health > 0 and (other.flags & TF_SHOOTABLE) != 0
+                local odx = other.x - th.x
+                local ody = other.y - th.y
+                local odist = sqrt(odx * odx + ody * ody)
+                if odist < r
+                    local dmg = damage * (1.0 - odist / r)
+                    if dmg > 0
+                        thing_damage(other, floor(dmg))
+                    end
+                end
+            end
+        end
+    end
+end
+
+function thing_missile_explode(th)
+    if th.splash != none and th.splash > 0
+        audio_play_sfx_pos(SFX_BAREXP, th.x, th.y)
+        thing_missile_splash(th)
+    end
+    th.health = 0
+    th.flags = 0
+end
+
+function thing_tick_missile(th)
+    th.x = th.x + th.vx
+    th.y = th.y + th.vy
+
+    # Wall collision via blockmap
+    if not doomCollide(th.x, th.y, 1, 0)
+        thing_missile_explode(th)
+        return
+    end
+
+    # Player hit (only for monster-fired missiles, or far enough from spawn)
+    local pdx = player_x - th.x
+    local pdy = player_y - th.y
+    if pdx * pdx + pdy * pdy < 400
+        if th.from_player != true
+            player_take_damage(th.damage)
+            thing_missile_explode(th)
+            return
+        end
+    end
+
+    # Monster hit (skip same-species friendly fire)
+    for i in range(things_count):
+        local other = things_active[format("{}", i)]
+        if other != none and other != th
+            if other.health > 0 and (other.flags & TF_SHOOTABLE) != 0
+                local same_species = false
+                if th.firer_type != none and other.type == th.firer_type
+                    same_species = true
+                end
+                if not same_species
+                    local odx = other.x - th.x
+                    local ody = other.y - th.y
+                    if odx * odx + ody * ody < 400
+                        # Infighting: victim now targets the firer
+                        if th.firer_idx != none and th.firer_idx >= 0 and th.from_player != true
+                            other.target_idx = th.firer_idx
+                        end
+                        thing_damage(other, th.damage)
+                        thing_missile_explode(th)
+                        return
+                    end
+                end
+            end
+        end
+    end
+
+    local ss = map_find_subsector(th.x, th.y)
+    if ss < 0 or ss >= map_data.ssectors_count
+        thing_missile_explode(th)
+        return
+    end
+
+    th.tics = th.tics + 1
+    if th.tics > 150
+        thing_missile_explode(th)
+    end
+end
+
+function thing_tick_ai(th)
+    th.tics = th.tics + 1
+
+    local tgt = thing_target_pos(th)
+    local dx = tgt.x - th.x
+    local dy = tgt.y - th.y
+    local dist = sqrt(dx * dx + dy * dy)
+
+    if th.ai == AI_IDLE
+        if dist < th.see_dist and thing_check_sight(th)
+            th.ai = AI_SEE
+            th.tics = 0
+            thing_play_see_sound(th)
+        end
+    end
+
+    if th.ai == AI_SEE
+        th.ai = AI_CHASE
+        th.tics = 0
+    end
+
+    if th.ai == AI_CHASE
+        local angle = atan2(dy, dx)
+        th.angle = angle
+        local mx = cos(angle) * th.speed
+        local my = sin(angle) * th.speed
+        # Per-axis blockmap collision so monsters can slide along walls
+        # instead of phasing through them. Match what player_tick does.
+        local floor_h = th.z
+        if doomCollide(th.x + mx, th.y, th.radius, floor_h)
+            th.x = th.x + mx
+        end
+        if doomCollide(th.x, th.y + my, th.radius, floor_h)
+            th.y = th.y + my
+        end
+
+        if dist < th.attack_dist
+            if th.tics % thing_attack_rate(th.type) == 0
+                if thing_is_melee(th.type) and dist < 80
+                    th.ai = AI_MELEE
+                    th.tics = 0
+                    # Lost Soul gives a chargeing scream when it lunges
+                    if th.type == THING_SOUL
+                        audio_play_sfx_pos("DSSKLATK", th.x, th.y)
+                    end
+                elif not thing_is_melee(th.type)
+                    th.ai = AI_MISSILE
+                    th.tics = 0
+                end
+            end
+        end
+
+        if dist > th.see_dist * 1.5
+            if not thing_check_sight(th)
+                th.ai = AI_IDLE
+                th.tics = 0
+            end
+        end
+    end
+
+    if th.ai == AI_MELEE
+        if th.tics == 0
+            if dist < 80
+                if tgt.is_monster
+                    local victim = things_active[format("{}", th.target_idx)]
+                    if victim != none
+                        thing_damage(victim, th.damage)
+                    end
+                else
+                    player_take_damage(th.damage)
+                end
+                thing_play_attack_sound(th)
+            end
+        end
+        if th.tics > 8
+            th.ai = AI_CHASE
+            th.tics = 0
+        end
+    end
+
+    if th.ai == AI_MISSILE
+        if th.tics == 0
+            thing_fire_missile(th)
+            thing_play_attack_sound(th)
+        end
+        if th.tics > 12
+            th.ai = AI_CHASE
+            th.tics = 0
+        end
+    end
+
+    if th.ai == AI_PAIN
+        if th.tics > 4
+            th.ai = AI_CHASE
+            th.tics = 0
+        end
+    end
+
+    if th.ai == AI_DEATH
+        # Stay in AI_DEATH long enough to play the full death sprite
+        # sequence (worst case 7 frames * 5 tics = 35). Once the
+        # animation is done, settle into AI_DEAD and drop solid/shootable
+        # flags so the corpse becomes pass-through.
+        if th.tics > 40
+            th.ai = AI_DEAD
+            th.flags = 0
+        end
+    end
+end
+
+function things_tick()
+    for i in range(things_count):
+        local th = things_active[format("{}", i)]
+        if th != none
+            if (th.flags & TF_MISSILE) != 0
+                thing_tick_missile(th)
+            elif (th.flags & TF_MONSTER) != 0 and th.health > 0
+                thing_tick_ai(th)
+            end
+        end
+    end
+    respawn_tick()
+end

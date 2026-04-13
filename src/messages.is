@@ -1,0 +1,61 @@
+# messages.is — HUD message log
+#
+# Vanilla Doom shows a single line of text at the top of the screen
+# whenever you pick something up, take damage from a barrel, etc. The
+# message fades after a few seconds. We keep a small ring of recent
+# messages so multiple pickups in quick succession all flash through.
+
+MSG_RING_SIZE   = 4
+MSG_HOLD_TICS   = 4 * 35      # 4 seconds @ 35 Hz
+MSG_FADE_TICS   = 35          # 1 second fade-out
+
+msg_ring        = {}
+msg_ring_head   = 0           # index of next slot to write
+msg_ring_count  = 0
+
+function msg_post(text)
+    if not opt_messages
+        return
+    end
+    local entry = {}
+    entry.text = text
+    entry.tic  = g_tic_count
+    msg_ring[format("{}", msg_ring_head)] = entry
+    msg_ring_head = (msg_ring_head + 1) % MSG_RING_SIZE
+    if msg_ring_count < MSG_RING_SIZE
+        msg_ring_count = msg_ring_count + 1
+    end
+end
+
+function msg_clear()
+    msg_ring = {}
+    msg_ring_head = 0
+    msg_ring_count = 0
+end
+
+# Render the topmost still-visible message at the top of the screen
+function msg_draw(fb, fnt)
+    if msg_ring_count == 0
+        return
+    end
+    # Walk back from head to find the most recent live message
+    local i = 0
+    while i < msg_ring_count
+        local idx = (msg_ring_head - 1 - i + MSG_RING_SIZE) % MSG_RING_SIZE
+        local entry = msg_ring[format("{}", idx)]
+        if entry != none
+            local age = g_tic_count - entry.tic
+            if age >= 0 and age < MSG_HOLD_TICS + MSG_FADE_TICS
+                local alpha = 1.0
+                if age > MSG_HOLD_TICS
+                    alpha = 1.0 - (age - MSG_HOLD_TICS) / MSG_FADE_TICS
+                end
+                if alpha > 0
+                    fb.text(fnt, entry.text, 4, 4, 1.0, 1.0, 1.0, alpha)
+                end
+                return
+            end
+        end
+        i = i + 1
+    end
+end

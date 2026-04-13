@@ -1,0 +1,222 @@
+# anim.is — Texture and flat animation cycling
+#
+# Vanilla Doom animates a fixed list of textures (FIREBLU, ROCKRED, BFALL,
+# etc.) and flats (NUKAGE, BLOOD, FWATER, LAVA) at 8 tics per frame. The
+# whole system is data-driven from a small table.
+#
+# Architecture:
+#   1. anim_init_table() defines the frame sequences (run once at boot)
+#   2. anim_scan_map() walks the loaded map's sectors + sidedefs and builds
+#      a list of slots that reference any animated texture (run on level
+#      load — avoids walking the whole map every tic)
+#   3. anim_tick() advances the global animation tic and updates only the
+#      slots we found, via doomSetSectorFlats / doomSetSidedefTexture
+#
+# We delegate the actual texture lookup + caching to the C renderer; this
+# file just decides which name should be in each slot at each tic.
+
+ANIM_TIC_RATE = 8   # tics per frame (vanilla)
+
+# Sequence tables: keyed by ANY frame name in the cycle, value is the
+# comma-separated frame list. Encoding it this way means we can look up
+# whatever texture name a level designer used (NUKAGE1 OR NUKAGE2 OR ...)
+# and find the same cycle.
+anim_flat_seq = {}
+anim_wall_seq = {}
+
+# After scan_map: lists of "slot descriptors" we update each tic.
+# Each entry is a string "i:slot:framecsv" because isilly's tables are
+# easier to iterate as flat key→value than as nested structures.
+anim_flat_users  = {}
+anim_flat_n      = 0
+anim_wall_users  = {}
+anim_wall_n      = 0
+
+anim_tic = 0
+
+# ── Sequence definitions ────────────────────────────────────────────────
+
+function _anim_register_flat(csv)
+    local frames = strSplit(csv, ",")
+    local i = 0
+    while i < len(frames)
+        anim_flat_seq[frames[i]] = csv
+        i = i + 1
+    end
+end
+
+function _anim_register_wall(csv)
+    local frames = strSplit(csv, ",")
+    local i = 0
+    while i < len(frames)
+        anim_wall_seq[frames[i]] = csv
+        i = i + 1
+    end
+end
+
+function anim_init_table()
+    anim_flat_seq = {}
+    anim_wall_seq = {}
+
+    # Vanilla Doom 1 flat animations
+    _anim_register_flat("NUKAGE1,NUKAGE2,NUKAGE3")
+    _anim_register_flat("FWATER1,FWATER2,FWATER3,FWATER4")
+    _anim_register_flat("SWATER1,SWATER2,SWATER3,SWATER4")
+    _anim_register_flat("LAVA1,LAVA2,LAVA3,LAVA4")
+    _anim_register_flat("BLOOD1,BLOOD2,BLOOD3")
+    _anim_register_flat("RROCK05,RROCK06,RROCK07,RROCK08")
+    _anim_register_flat("SLIME01,SLIME02,SLIME03,SLIME04")
+    _anim_register_flat("SLIME05,SLIME06,SLIME07,SLIME08")
+    _anim_register_flat("SLIME09,SLIME10,SLIME11,SLIME12")
+
+    # Vanilla Doom 1 wall animations
+    _anim_register_wall("BLODGR1,BLODGR2,BLODGR3,BLODGR4")
+    _anim_register_wall("BLODRIP1,BLODRIP2,BLODRIP3,BLODRIP4")
+    _anim_register_wall("FIREBLU1,FIREBLU2")
+    _anim_register_wall("FIRELAV3,FIRELAVA")
+    _anim_register_wall("FIREMAG1,FIREMAG2,FIREMAG3")
+    _anim_register_wall("FIREWALA,FIREWALB,FIREWALL")
+    _anim_register_wall("GSTFONT1,GSTFONT2,GSTFONT3")
+    _anim_register_wall("ROCKRED1,ROCKRED2,ROCKRED3")
+    _anim_register_wall("SLADRIP1,SLADRIP2,SLADRIP3")
+    _anim_register_wall("BFALL1,BFALL2,BFALL3,BFALL4")
+    _anim_register_wall("SFALL1,SFALL2,SFALL3,SFALL4")
+    _anim_register_wall("WFALL1,WFALL2,WFALL3,WFALL4")
+    _anim_register_wall("DBRAIN1,DBRAIN2,DBRAIN3,DBRAIN4")
+end
+
+# ── Per-level scan ──────────────────────────────────────────────────────
+
+function anim_scan_map()
+    anim_flat_users = {}
+    anim_flat_n     = 0
+    anim_wall_users = {}
+    anim_wall_n     = 0
+    anim_tic        = 0
+
+    if map_data == none
+        return
+    end
+
+    # Sectors → flat animations (floor + ceil slots)
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        local fcsv = anim_flat_seq[sec.floor_tex]
+        if fcsv != none
+            anim_flat_users[format("{}", anim_flat_n)] = format("{}:0:{}", i, fcsv)
+            anim_flat_n = anim_flat_n + 1
+        end
+        local ccsv = anim_flat_seq[sec.ceil_tex]
+        if ccsv != none
+            anim_flat_users[format("{}", anim_flat_n)] = format("{}:1:{}", i, ccsv)
+            anim_flat_n = anim_flat_n + 1
+        end
+    end
+
+    # Sidedefs → wall animations (upper/middle/lower slots)
+    for i in range(map_data.sidedefs_count):
+        local sd = map_data.sidedefs[i]
+        local ucsv = anim_wall_seq[sd.upper]
+        if ucsv != none
+            anim_wall_users[format("{}", anim_wall_n)] = format("{}:0:{}", i, ucsv)
+            anim_wall_n = anim_wall_n + 1
+        end
+        local mcsv = anim_wall_seq[sd.middle]
+        if mcsv != none
+            anim_wall_users[format("{}", anim_wall_n)] = format("{}:1:{}", i, mcsv)
+            anim_wall_n = anim_wall_n + 1
+        end
+        local lcsv = anim_wall_seq[sd.lower]
+        if lcsv != none
+            anim_wall_users[format("{}", anim_wall_n)] = format("{}:2:{}", i, lcsv)
+            anim_wall_n = anim_wall_n + 1
+        end
+    end
+end
+
+# ── Per-tic update ──────────────────────────────────────────────────────
+
+# Parse a "idx:slot:csv" entry, compute the current frame, return the new
+# texture name (or "" if parse fails).
+function _anim_resolve(entry, frame_step)
+    local p1 = indexOf(entry, ":")
+    if p1 < 0
+        return ""
+    end
+    local rest = substr(entry, p1 + 1, strlen(entry) - p1 - 1)
+    local p2 = indexOf(rest, ":")
+    if p2 < 0
+        return ""
+    end
+    local csv = substr(rest, p2 + 1, strlen(rest) - p2 - 1)
+    local frames = strSplit(csv, ",")
+    local n = len(frames)
+    if n <= 0
+        return ""
+    end
+    local fi = frame_step % n
+    return frames[fi]
+end
+
+function _anim_entry_idx(entry)
+    local p = indexOf(entry, ":")
+    if p < 0
+        return -1
+    end
+    return int(substr(entry, 0, p))
+end
+
+function _anim_entry_slot(entry)
+    local p1 = indexOf(entry, ":")
+    if p1 < 0
+        return -1
+    end
+    local rest = substr(entry, p1 + 1, strlen(entry) - p1 - 1)
+    local p2 = indexOf(rest, ":")
+    if p2 < 0
+        return -1
+    end
+    return int(substr(rest, 0, p2))
+end
+
+function anim_tick()
+    anim_tic = anim_tic + 1
+    if (anim_tic % ANIM_TIC_RATE) != 0
+        return
+    end
+    local frame_step = anim_tic / ANIM_TIC_RATE
+
+    # Flats: update floor or ceil per entry
+    local i = 0
+    while i < anim_flat_n
+        local entry = anim_flat_users[format("{}", i)]
+        if entry != none
+            local idx  = _anim_entry_idx(entry)
+            local slot = _anim_entry_slot(entry)
+            local name = _anim_resolve(entry, frame_step)
+            if idx >= 0 and name != ""
+                if slot == 0
+                    doomSetSectorFlats(idx, name, "-")
+                else
+                    doomSetSectorFlats(idx, "-", name)
+                end
+            end
+        end
+        i = i + 1
+    end
+
+    # Walls: update upper/middle/lower per entry
+    i = 0
+    while i < anim_wall_n
+        local entry = anim_wall_users[format("{}", i)]
+        if entry != none
+            local idx  = _anim_entry_idx(entry)
+            local slot = _anim_entry_slot(entry)
+            local name = _anim_resolve(entry, frame_step)
+            if idx >= 0 and name != ""
+                doomSetSidedefTexture(idx, slot, name)
+            end
+        end
+        i = i + 1
+    end
+end

@@ -1,0 +1,540 @@
+# weapon.is — Weapon state machine and firing logic
+
+WPN_FIST     = 0
+WPN_PISTOL   = 1
+WPN_SHOTGUN  = 2
+WPN_CHAINGUN = 3
+WPN_LAUNCHER = 4
+WPN_PLASMA   = 5
+WPN_BFG      = 6
+WPN_CHAINSAW = 7
+
+WS_READY     = 0
+WS_RAISE     = 1
+WS_LOWER     = 2
+WS_FIRE      = 3
+
+wpn_state     = WS_READY
+wpn_tics      = 0
+wpn_current   = WPN_PISTOL
+wpn_pending   = -1
+wpn_bob_x     = 0.0
+wpn_bob_y     = 0.0
+wpn_flash     = 0
+# Latch for "fire button must release between shots". Set when a non-auto
+# weapon (pistol, shotgun, fist, rocket launcher, BFG) fires; cleared
+# only when the user lets go of fire. Without this, holding fire on the
+# pistol auto-shoots every refire window. Auto weapons (chaingun,
+# chainsaw, plasma) ignore the latch.
+wpn_fire_latched = false
+
+wpn_defs = {}
+
+function weapon_init()
+    local d = {}
+    d.ammo = "none"
+    d.per_shot = 0
+    d.damage = 10
+    d.refire = 8
+    d.raise_t = 6
+    d.lower_t = 6
+    wpn_defs.fist = d
+
+    d = {}
+    d.ammo = "clip"
+    d.per_shot = 1
+    d.damage = 10
+    d.refire = 10
+    d.raise_t = 6
+    d.lower_t = 6
+    wpn_defs.pistol = d
+
+    d = {}
+    d.ammo = "shell"
+    d.per_shot = 1
+    d.damage = 70
+    d.refire = 20
+    d.raise_t = 6
+    d.lower_t = 6
+    wpn_defs.shotgun = d
+
+    d = {}
+    d.ammo = "clip"
+    d.per_shot = 1
+    d.damage = 10
+    d.refire = 4
+    d.raise_t = 6
+    d.lower_t = 6
+    wpn_defs.chaingun = d
+
+    d = {}
+    d.ammo = "rocket"
+    d.per_shot = 1
+    d.damage = 100
+    d.refire = 20
+    d.raise_t = 6
+    d.lower_t = 6
+    wpn_defs.launcher = d
+
+    d = {}
+    d.ammo = "cell"
+    d.per_shot = 1
+    d.damage = 20
+    d.refire = 3
+    d.raise_t = 6
+    d.lower_t = 6
+    wpn_defs.plasma = d
+
+    d = {}
+    d.ammo = "cell"
+    d.per_shot = 40
+    d.damage = 600
+    d.refire = 30
+    d.raise_t = 6
+    d.lower_t = 6
+    wpn_defs.bfg = d
+
+    d = {}
+    d.ammo = "none"
+    d.per_shot = 0
+    d.damage = 10
+    d.refire = 4
+    d.raise_t = 6
+    d.lower_t = 6
+    wpn_defs.chainsaw = d
+end
+
+function get_wpn_def(idx)
+    if idx == WPN_FIST
+        return wpn_defs.fist
+    end
+    if idx == WPN_PISTOL
+        return wpn_defs.pistol
+    end
+    if idx == WPN_SHOTGUN
+        return wpn_defs.shotgun
+    end
+    if idx == WPN_CHAINGUN
+        return wpn_defs.chaingun
+    end
+    if idx == WPN_LAUNCHER
+        return wpn_defs.launcher
+    end
+    if idx == WPN_PLASMA
+        return wpn_defs.plasma
+    end
+    if idx == WPN_BFG
+        return wpn_defs.bfg
+    end
+    if idx == WPN_CHAINSAW
+        return wpn_defs.chainsaw
+    end
+    return none
+end
+
+function get_ammo(key)
+    if key == "clip"
+        return player_ammo.clip
+    end
+    if key == "shell"
+        return player_ammo.shell
+    end
+    if key == "rocket"
+        return player_ammo.rocket
+    end
+    if key == "cell"
+        return player_ammo.cell
+    end
+    return 0
+end
+
+function set_ammo(key, val)
+    if key == "clip"
+        player_ammo.clip = val
+    end
+    if key == "shell"
+        player_ammo.shell = val
+    end
+    if key == "rocket"
+        player_ammo.rocket = val
+    end
+    if key == "cell"
+        player_ammo.cell = val
+    end
+end
+
+# -- Weapon sprite names (WAD lump names) --
+
+function wpn_sprite_name(idx)
+    if idx == WPN_FIST
+        return "PUNGA0"
+    end
+    if idx == WPN_PISTOL
+        return "PISGA0"
+    end
+    if idx == WPN_SHOTGUN
+        return "SHTGA0"
+    end
+    if idx == WPN_CHAINGUN
+        return "CHGGA0"
+    end
+    if idx == WPN_LAUNCHER
+        return "MISGA0"
+    end
+    if idx == WPN_PLASMA
+        return "PLSGA0"
+    end
+    if idx == WPN_BFG
+        return "BFGGA0"
+    end
+    if idx == WPN_CHAINSAW
+        return "SAWGA0"
+    end
+    return "PISGA0"
+end
+
+function wpn_flash_name(idx)
+    if idx == WPN_PISTOL
+        return "PISFA0"
+    end
+    if idx == WPN_SHOTGUN
+        return "SHTFA0"
+    end
+    if idx == WPN_CHAINGUN
+        return "CHGFA0"
+    end
+    if idx == WPN_LAUNCHER
+        return "MISFA0"
+    end
+    if idx == WPN_PLASMA
+        return "PLSFA0"
+    end
+    if idx == WPN_BFG
+        return "BFGFA0"
+    end
+    return wpn_sprite_name(idx)
+end
+
+# -- Functions called BY weapon_tick (must be defined before it) --
+
+# 2D autoaim helper: pick the best monster within a forward cone of
+# half-angle ~5°, breaking ties by distance. Returns the chosen thing
+# or `none`. Vanilla DOOM does this by trying three pre-baked slopes
+# (-, 0, +) — we just snap angle to whoever is closest in the cone.
+function weapon_autoaim(angle, max_dist)
+    if map_data == none
+        return none
+    end
+    local cone = 0.087   # ~5° in radians
+    local cos_a = cos(angle)
+    local sin_a = sin(angle)
+    local best = none
+    local best_dist = max_dist
+    local i = 0
+    while i < things_count
+        local th = things_active[format("{}", i)]
+        if th != none and th.health > 0 and (th.flags & TF_SHOOTABLE) != 0
+            local dx = th.x - player_x
+            local dy = th.y - player_y
+            # Forward distance along the player's facing
+            local fwd = dx * cos_a + dy * sin_a
+            if fwd > 0 and fwd < best_dist
+                # Perpendicular offset
+                local side = abs(dx * (0 - sin_a) + dy * cos_a)
+                if side < fwd * cone + th.radius
+                    best = th
+                    best_dist = fwd
+                end
+            end
+        end
+        i = i + 1
+    end
+    return best
+end
+
+# Hitscan trace. Walks the ray forward in 2D; clips at the first solid
+# wall (blockmap query); for each step compares against monsters with
+# both a horizontal radius check AND a vertical hit gate so you can't
+# headshot a monster on a higher platform from below.
+function weapon_trace_line(angle, damage)
+    if map_data == none
+        return
+    end
+    local max_dist = 512
+    local step = 4
+
+    # Pick a target via autoaim. If we find one, set the slope to its
+    # center; otherwise just shoot horizontally. This means looking
+    # roughly at a Caco that's slightly above you actually hits.
+    local target = weapon_autoaim(angle, max_dist)
+    local slope = 0.0
+    if target != none
+        local dx = target.x - player_x
+        local dy = target.y - player_y
+        local hdist = sqrt(dx * dx + dy * dy)
+        if hdist > 1
+            local target_z_mid = target.z + target.height / 2
+            slope = (target_z_mid - player_z) / hdist
+        end
+    end
+
+    local tx = player_x
+    local ty = player_y
+    local tz = player_z
+    local ddx = cos(angle) * step
+    local ddy = sin(angle) * step
+    local ddz = slope * step
+
+    local d = 0
+    while d * step <= max_dist
+        tx = tx + ddx
+        ty = ty + ddy
+        tz = tz + ddz
+
+        # Wall: the blockmap query takes the line's CURRENT z (not
+        # eye z), so step-up walls become solid above the player.
+        if not doomCollide(tx, ty, 1, tz)
+            return
+        end
+
+        # Vertical floor/ceiling: if the trace point is below the local
+        # floor or above the local ceiling, we've left the world.
+        local floor_h = doomFloorHeight(tx, ty)
+        if tz < floor_h
+            return
+        end
+
+        # Monster hit — horizontal radius + vertical box overlap
+        local i = 0
+        while i < things_count
+            local th = things_active[format("{}", i)]
+            if th != none and th.health > 0 and (th.flags & TF_SHOOTABLE) != 0
+                local dist_x = tx - th.x
+                local dist_y = ty - th.y
+                local r2 = th.radius * th.radius
+                if dist_x * dist_x + dist_y * dist_y < r2 + 100
+                    if tz >= th.z and tz <= th.z + th.height
+                        thing_damage(th, damage)
+                        return
+                    end
+                end
+            end
+            i = i + 1
+        end
+
+        d = d + 1
+    end
+end
+
+function weapon_fire_shotgun(damage)
+    local p = 0
+    while p <= 6
+        local ang = player_angle + (rand() - 0.5) * 0.15
+        weapon_trace_line(ang, damage / 7)
+        p = p + 1
+    end
+end
+
+# Spawn a player projectile of the given kind. Kind controls:
+#   speed, splash radius, sprite name (set on the thing for render mode),
+#   and the sound played on impact (handled in things_logic.is).
+PROJ_ROCKET = 0
+PROJ_PLASMA = 1
+PROJ_BFG    = 2
+
+function weapon_fire_projectile(kind, damage)
+    local mx = player_x + cos(player_angle) * 32
+    local my = player_y + sin(player_angle) * 32
+    local proj = thing_spawn(0, mx, my, player_z, player_angle * 180 / PI)
+    proj.flags  = TF_MISSILE
+    proj.health = 1
+    proj.damage = damage
+    proj.from_player = true
+    proj.proj_kind = kind
+
+    local speed = 20
+    local splash = 0
+    local spr_pfx = "MISL"   # default rocket sprite (MISL)
+    if kind == PROJ_ROCKET
+        speed = 20
+        splash = 128
+        spr_pfx = "MISL"
+    elif kind == PROJ_PLASMA
+        speed = 25
+        splash = 0
+        spr_pfx = "PLSS"
+    elif kind == PROJ_BFG
+        speed = 25
+        splash = 256
+        spr_pfx = "BFS1"
+    end
+    proj.vx = cos(player_angle) * speed
+    proj.vy = sin(player_angle) * speed
+    proj.splash = splash
+    proj.sprite_pfx = spr_pfx
+end
+
+function weapon_has_ammo()
+    local wdef = get_wpn_def(wpn_current)
+    if wdef == none
+        return false
+    end
+    if wdef.ammo == "none"
+        return true
+    end
+    return get_ammo(wdef.ammo) >= wdef.per_shot
+end
+
+function weapon_fire()
+    local wdef = get_wpn_def(wpn_current)
+    if wdef == none
+        return
+    end
+
+    if wdef.ammo != "none"
+        set_ammo(wdef.ammo, get_ammo(wdef.ammo) - wdef.per_shot)
+    end
+
+    wpn_state = WS_FIRE
+    wpn_tics  = wdef.refire
+    wpn_flash = 2
+
+    if wpn_current == WPN_PISTOL
+        audio_play_sfx(SFX_PISTOL)
+    end
+    if wpn_current == WPN_SHOTGUN
+        audio_play_sfx(SFX_SHOTGN)
+    end
+    if wpn_current == WPN_CHAINGUN
+        audio_play_sfx(SFX_PISTOL)
+    end
+    if wpn_current == WPN_PLASMA
+        audio_play_sfx(SFX_PLASMA)
+    end
+    if wpn_current == WPN_BFG
+        audio_play_sfx(SFX_BFG)
+    end
+    if wpn_current == WPN_CHAINSAW
+        audio_play_sfx(SFX_SAWFUL)
+    end
+    if wpn_current == WPN_LAUNCHER
+        audio_play_sfx(SFX_RLAUNC)
+    end
+
+    local dmg = wdef.damage
+    # Berserk multiplies fist damage massively
+    if wpn_current == WPN_FIST and player_berserk
+        dmg = dmg * 10
+    end
+
+    if wpn_current == WPN_LAUNCHER
+        weapon_fire_projectile(PROJ_ROCKET, dmg)
+    elif wpn_current == WPN_PLASMA
+        weapon_fire_projectile(PROJ_PLASMA, dmg)
+    elif wpn_current == WPN_BFG
+        weapon_fire_projectile(PROJ_BFG, dmg)
+    elif wpn_current == WPN_SHOTGUN
+        weapon_fire_shotgun(dmg)
+    else
+        local ang = player_angle + (rand() - 0.5) * 0.03
+        weapon_trace_line(ang, dmg)
+    end
+end
+
+function weapon_check_switch()
+    local want = player_weapon
+    if want != wpn_current and want >= 0 and want <= 7
+        if get_wpn_def(want) != none
+            wpn_pending = want
+            wpn_state = WS_LOWER
+            wpn_tics = get_wpn_def(wpn_current).lower_t
+        end
+    end
+end
+
+# Auto-fire weapons keep shooting while the trigger is held; everything
+# else needs to release-and-press between shots.
+function _weapon_is_auto(idx)
+    if idx == WPN_CHAINGUN
+        return true
+    end
+    if idx == WPN_CHAINSAW
+        return true
+    end
+    if idx == WPN_PLASMA
+        return true
+    end
+    return false
+end
+
+function weapon_check_fire()
+    if not player_cmd_fire
+        wpn_fire_latched = false
+        return
+    end
+    if not weapon_has_ammo()
+        return
+    end
+    if _weapon_is_auto(wpn_current)
+        weapon_fire()
+        return
+    end
+    if not wpn_fire_latched
+        weapon_fire()
+        wpn_fire_latched = true
+    end
+end
+
+# -- weapon_tick calls the above functions --
+
+function weapon_tick()
+    if player_cmd_forward != 0 or player_cmd_strafe != 0
+        wpn_bob_x = sin(g_tic_count * 0.3) * 3.0
+        wpn_bob_y = abs(cos(g_tic_count * 0.3)) * 3.0
+    else
+        wpn_bob_x = wpn_bob_x * 0.9
+        wpn_bob_y = wpn_bob_y * 0.9
+    end
+
+    if wpn_flash > 0
+        wpn_flash = wpn_flash - 1
+    end
+
+    # Chainsaw idle hum — vanilla plays DSSAWIDL while held idle
+    if wpn_current == WPN_CHAINSAW and wpn_state == WS_READY
+        if g_tic_count % 70 == 0
+            audio_play_sfx(SFX_SAWIDL)
+        end
+    end
+
+    if wpn_state == WS_READY
+        weapon_check_switch()
+        weapon_check_fire()
+    elif wpn_state == WS_RAISE
+        wpn_tics = wpn_tics - 1
+        if wpn_tics <= 0
+            wpn_state = WS_READY
+        end
+    elif wpn_state == WS_LOWER
+        wpn_tics = wpn_tics - 1
+        if wpn_tics <= 0
+            wpn_current = wpn_pending
+            wpn_pending = -1
+            wpn_state = WS_RAISE
+            wpn_tics = get_wpn_def(wpn_current).raise_t
+        end
+    elif wpn_state == WS_FIRE
+        wpn_tics = wpn_tics - 1
+        if wpn_tics <= 0
+            wpn_state = WS_READY
+            if player_cmd_fire and weapon_has_ammo() and _weapon_is_auto(wpn_current)
+                weapon_fire()
+            end
+        end
+    end
+end
+
+# Note: there used to be a `weapon_draw` here that drew the held weapon
+# as a coloured rectangle. The real weapon sprite is rendered by
+# hud_draw via doomDrawPatch (see hud.is) — this stub was leftover and
+# never called from anywhere.

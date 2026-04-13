@@ -1,0 +1,644 @@
+# menu.is — Title/options menu state + input. Drawing is in menu_draw.is.
+
+MENU_MAIN    = 0
+MENU_EPISODE = 1
+MENU_SKILL   = 2
+MENU_OPTIONS = 3
+MENU_SAVE    = 4
+MENU_LOAD    = 5
+MENU_CONFIRM = 6   # Yes/No modal — used for overwrite confirmation
+
+# Confirm modal state
+menu_confirm_text   = ""
+menu_confirm_action = ""    # "save_slot_N" — slot to write on YES
+menu_confirm_return = MENU_MAIN
+menu_confirm_cursor_save = 0
+
+menu_state         = MENU_MAIN
+menu_cursor        = 0
+menu_skull_tic     = 0
+
+# True when the menu was opened mid-level (so ESC returns to play instead
+# of quitting). Set by main.is when ESC opens the menu from GS_LEVEL.
+menu_paused_from_level = false
+
+# Player choices stashed between menu screens
+menu_chosen_episode = 1
+
+MAIN_ITEMS_COUNT    = 3   # New / Options / Quit (also Save/Load when in-level)
+EPISODE_ITEMS_COUNT = 4
+SKILL_ITEMS_COUNT   = 5
+SLOT_ITEMS_COUNT    = 6   # save/load picker slots 1..6
+
+# Available episodes (discovered from WAD at init)
+menu_episode_present = {}
+
+MENU_Y_START = 72
+MENU_Y_STEP  = 16
+MENU_X       = 97
+
+EPI_Y_START  = 63
+EPI_Y_STEP   = 16
+EPI_X        = 48
+
+SKILL_Y_START = 63
+SKILL_Y_STEP  = 16
+SKILL_X       = 48
+
+OPT_ENDGAME    = 0
+OPT_MESSAGES   = 1
+OPT_DETAIL     = 2
+OPT_CROSSHAIR  = 3
+OPT_SCRNSIZE   = 4
+OPT_MSENS      = 5
+OPT_SFXVOL     = 6
+OPT_MUSVOL     = 7
+OPT_ITEMS_COUNT = 8
+
+opt_messages    = true
+opt_detail_high = true
+opt_crosshair   = true
+opt_screen_size = 9
+opt_mouse_sens  = 5
+opt_sfx_volume  = 12   # 0..15
+opt_music_volume = 12  # 0..15
+
+OPT_Y_TITLE     = 11
+OPT_Y_ENDGAME   = 30
+OPT_Y_MESSAGES  = 44
+OPT_Y_DETAIL    = 58
+OPT_Y_CROSSHAIR = 72
+OPT_Y_SCRNSIZE  = 86
+OPT_Y_SCRNSLDR  = 100
+OPT_Y_MSENS     = 114
+OPT_Y_MSENSLDR  = 128
+OPT_Y_SFXVOL    = 142
+OPT_Y_SFXSLDR   = 156
+OPT_Y_MUSVOL    = 170
+OPT_Y_MUSSLDR   = 184
+
+OPT_X = 60
+
+# Track previous mouse cursor cell so hover doesn't constantly retrigger
+# the cursor sound on stationary frames.
+menu_mouse_last_hit = -1
+
+# Map a window-space mouse Y to a uniform menu row index, or -1 if outside.
+#
+# Bins are aligned to the actual visual rows (item N occupies
+# [y_start + N*y_step, y_start + (N+1)*y_step)). A 4-pixel "lead-in"
+# above the first item still counts as item 0 for forgiveness.
+function menu_hit_uniform(my, y_start, y_step, count)
+    if my < y_start - 4 or my >= y_start + count * y_step
+        return -1
+    end
+    local rel = my - y_start
+    if rel < 0
+        rel = 0
+    end
+    local idx = rel / y_step
+    if idx < 0 or idx >= count
+        return -1
+    end
+    return idx
+end
+
+# Map options menu Y → cursor index. Options items aren't uniformly spaced,
+# so we hit-test each row's Y range.
+function menu_hit_options(my)
+    if my >= OPT_Y_ENDGAME - 4 and my < OPT_Y_ENDGAME + 12
+        return OPT_ENDGAME
+    end
+    if my >= OPT_Y_MESSAGES - 4 and my < OPT_Y_MESSAGES + 12
+        return OPT_MESSAGES
+    end
+    if my >= OPT_Y_DETAIL - 4 and my < OPT_Y_DETAIL + 12
+        return OPT_DETAIL
+    end
+    if my >= OPT_Y_CROSSHAIR - 4 and my < OPT_Y_CROSSHAIR + 12
+        return OPT_CROSSHAIR
+    end
+    if my >= OPT_Y_SCRNSIZE - 4 and my < OPT_Y_SCRNSIZE + 18
+        return OPT_SCRNSIZE
+    end
+    if my >= OPT_Y_MSENS - 4 and my < OPT_Y_MSENS + 18
+        return OPT_MSENS
+    end
+    if my >= OPT_Y_SFXVOL - 4 and my < OPT_Y_SFXVOL + 18
+        return OPT_SFXVOL
+    end
+    if my >= OPT_Y_MUSVOL - 4 and my < OPT_Y_MUSVOL + 18
+        return OPT_MUSVOL
+    end
+    return -1
+end
+
+# Slider hit-test. Returns the snapped slider value [0..max_value] for the
+# given mouse X if it falls inside the slider's track area, otherwise -1.
+# Track layout matches menu_draw_slider:
+#   left cap @ x, segments[i] @ x + 8 + i*8, right cap @ x + 8 + segments*8.
+# Active drag range is the segment area: [x + 8, x + 8 + segments*8).
+function menu_slider_value_at(mx, my, slider_x, slider_y, segments, max_value)
+    if my < slider_y - 4 or my > slider_y + 12
+        return -1
+    end
+    local left  = slider_x + 8
+    local right = slider_x + 8 + segments * 8
+    if mx < left - 8 or mx > right + 8
+        return -1
+    end
+    local rel = mx - left
+    if rel < 0
+        rel = 0
+    end
+    if rel >= segments * 8
+        rel = segments * 8 - 1
+    end
+    local seg_idx = rel / 8
+    return (seg_idx * max_value) / (segments - 1)
+end
+
+# When the user holds LEFT in the options menu and the mouse is over a
+# slider track, snap the slider's value to the cursor position. This
+# replaces the keyboard-only LEFT/RIGHT adjustment for sliders.
+function menu_handle_slider_drag(mx, my)
+    if menu_state != MENU_OPTIONS
+        return
+    end
+    if not mouseButton(MOUSE_LEFT)
+        return
+    end
+    local v = menu_slider_value_at(mx, my, OPT_X, OPT_Y_SCRNSLDR, 8, 7)
+    if v >= 0
+        opt_screen_size = v + 4
+        return
+    end
+    v = menu_slider_value_at(mx, my, OPT_X, OPT_Y_MSENSLDR, 10, 9)
+    if v >= 0
+        opt_mouse_sens = v
+        return
+    end
+    v = menu_slider_value_at(mx, my, OPT_X, OPT_Y_SFXSLDR, 16, 15)
+    if v >= 0
+        opt_sfx_volume = v
+        return
+    end
+    v = menu_slider_value_at(mx, my, OPT_X, OPT_Y_MUSSLDR, 16, 15)
+    if v >= 0
+        opt_music_volume = v
+        audio_apply_music_volume()
+        return
+    end
+end
+
+# Walk current menu items, find the one under the mouse cursor, hover-track
+# and click-select it. Called from menu_read_input each frame.
+function menu_handle_mouse()
+    # Map window mouse position to render-buffer pixel space (RW=320, WIDTH=1280
+    # by default — divide by the upscale ratio).
+    local mx = (mouseX() * RW) / WIDTH
+    local my = (mouseY() * RH) / HEIGHT
+
+    # Slider drag has priority over hover/click — sliders span multiple
+    # cursor-row hit zones in the options menu, and you don't want a
+    # drag from slider A into slider B's row to retrigger hover sounds.
+    menu_handle_slider_drag(mx, my)
+
+    local hit = -1
+    if menu_state == MENU_MAIN
+        hit = menu_hit_uniform(my, MENU_Y_START, MENU_Y_STEP, menu_main_count())
+    elif menu_state == MENU_EPISODE
+        hit = menu_hit_uniform(my, EPI_Y_START, EPI_Y_STEP, EPISODE_ITEMS_COUNT)
+        if hit >= 0 and not menu_episode_available(hit)
+            hit = -1
+        end
+    elif menu_state == MENU_SKILL
+        hit = menu_hit_uniform(my, SKILL_Y_START, SKILL_Y_STEP, SKILL_ITEMS_COUNT)
+    elif menu_state == MENU_SAVE or menu_state == MENU_LOAD
+        hit = menu_hit_uniform(my, SLOT_Y_START, SLOT_Y_STEP, SLOT_ITEMS_COUNT)
+    elif menu_state == MENU_OPTIONS
+        hit = menu_hit_options(my)
+    end
+
+    if hit >= 0 and hit != menu_cursor
+        menu_cursor = hit
+        if hit != menu_mouse_last_hit
+            audio_play_sfx(SFX_PSTOP)
+        end
+    end
+    menu_mouse_last_hit = hit
+
+    if hit >= 0 and mouseJustPressed(MOUSE_LEFT)
+        menu_select()
+        audio_play_sfx(SFX_SWTCHN)
+    end
+end
+
+function menu_read_input()
+    menu_handle_mouse()
+    if keyJustPressed(KEY_UP)
+        menu_cursor = menu_cursor - 1
+        if menu_cursor < 0
+            menu_cursor = menu_current_count() - 1
+        end
+        if menu_state == MENU_EPISODE
+            menu_skip_locked_episodes(-1)
+        end
+        audio_play_sfx(SFX_PSTOP)
+    end
+    if keyJustPressed(KEY_DOWN)
+        menu_cursor = menu_cursor + 1
+        if menu_cursor >= menu_current_count()
+            menu_cursor = 0
+        end
+        if menu_state == MENU_EPISODE
+            menu_skip_locked_episodes(1)
+        end
+        audio_play_sfx(SFX_PSTOP)
+    end
+    if menu_state == MENU_OPTIONS
+        if keyJustPressed(KEY_LEFT)
+            menu_adjust(-1)
+            audio_play_sfx(SFX_PSTOP)
+        end
+        if keyJustPressed(KEY_RIGHT)
+            menu_adjust(1)
+            audio_play_sfx(SFX_PSTOP)
+        end
+    end
+    if menu_state == MENU_CONFIRM
+        if keyJustPressed(KEY_LEFT)
+            menu_cursor = 0
+            audio_play_sfx(SFX_PSTOP)
+        end
+        if keyJustPressed(KEY_RIGHT)
+            menu_cursor = 1
+            audio_play_sfx(SFX_PSTOP)
+        end
+    end
+    # DELETE in slot pickers — confirm and clear the slot
+    if menu_state == MENU_SAVE or menu_state == MENU_LOAD
+        if keyJustPressed(KEY_DELETE)
+            local slot = menu_cursor + 1
+            if save_slot_label(slot) != "EMPTY"
+                menu_confirm_text = format("Clear slot {}?", slot)
+                menu_confirm_action = format("delete_slot_{}", slot)
+                menu_confirm_return = menu_state
+                menu_confirm_cursor_save = menu_cursor
+                menu_state = MENU_CONFIRM
+                menu_cursor = 1   # Default to NO
+                audio_play_sfx(SFX_PSTOP)
+            end
+        end
+    end
+    if keyJustPressed(KEY_RETURN) or keyJustPressed(KEY_SPACE)
+        menu_select()
+        audio_play_sfx(SFX_SWTCHN)
+    end
+end
+
+function menu_back()
+    if menu_state == MENU_OPTIONS
+        if menu_main_in_level()
+            menu_state = MENU_MAIN
+            menu_cursor = 3   # Options is index 3 in level menu
+        else
+            menu_state = MENU_MAIN
+            menu_cursor = 1
+        end
+        return true
+    end
+    if menu_state == MENU_EPISODE
+        menu_state = MENU_MAIN
+        menu_cursor = 0
+        return true
+    end
+    if menu_state == MENU_SKILL
+        menu_state = MENU_EPISODE
+        menu_cursor = menu_chosen_episode - 1
+        return true
+    end
+    if menu_state == MENU_SAVE
+        menu_state = MENU_MAIN
+        menu_cursor = 1
+        return true
+    end
+    if menu_state == MENU_LOAD
+        menu_state = MENU_MAIN
+        menu_cursor = 2
+        return true
+    end
+    if menu_state == MENU_CONFIRM
+        menu_state = menu_confirm_return
+        menu_cursor = menu_confirm_cursor_save
+        return true
+    end
+    if menu_state == MENU_MAIN
+        # If we paused from gameplay, ESC at the root resumes the level
+        if menu_paused_from_level
+            menu_paused_from_level = false
+            game_set_state(GS_LEVEL)
+            return true
+        end
+    end
+    return false
+end
+
+function menu_init(wad)
+    menu_skull_tic = 0
+    # Detect which episodes the loaded WAD actually has
+    menu_episode_present = {}
+    menu_episode_present["1"] = wadFindLump(wad, "E1M1") >= 0
+    menu_episode_present["2"] = wadFindLump(wad, "E2M1") >= 0
+    menu_episode_present["3"] = wadFindLump(wad, "E3M1") >= 0
+    menu_episode_present["4"] = wadFindLump(wad, "E4M1") >= 0
+end
+
+function menu_episode_available(idx)
+    # idx is 0..3 -> "1".."4"
+    return menu_episode_present[format("{}", idx + 1)] == true
+end
+
+function menu_first_available_episode()
+    local i = 0
+    while i < EPISODE_ITEMS_COUNT
+        if menu_episode_available(i)
+            return i
+        end
+        i = i + 1
+    end
+    return 0
+end
+
+# Walk menu_cursor in `dir` (+1 / -1) over the episode list, skipping
+# any episodes the WAD doesn't have. Wraps at the ends. No-op if no
+# episodes are available.
+function menu_skip_locked_episodes(dir)
+    local guard = 0
+    while not menu_episode_available(menu_cursor) and guard < EPISODE_ITEMS_COUNT
+        menu_cursor = menu_cursor + dir
+        if menu_cursor < 0
+            menu_cursor = EPISODE_ITEMS_COUNT - 1
+        end
+        if menu_cursor >= EPISODE_ITEMS_COUNT
+            menu_cursor = 0
+        end
+        guard = guard + 1
+    end
+end
+
+function menu_current_count()
+    if menu_state == MENU_MAIN
+        return menu_main_count()
+    end
+    if menu_state == MENU_EPISODE
+        return EPISODE_ITEMS_COUNT
+    end
+    if menu_state == MENU_SKILL
+        return SKILL_ITEMS_COUNT
+    end
+    if menu_state == MENU_OPTIONS
+        return OPT_ITEMS_COUNT
+    end
+    if menu_state == MENU_SAVE
+        return SLOT_ITEMS_COUNT
+    end
+    if menu_state == MENU_LOAD
+        return SLOT_ITEMS_COUNT
+    end
+    if menu_state == MENU_CONFIRM
+        return 2
+    end
+    return 0
+end
+
+# When paused mid-level, the main menu has 5 items: New, Save, Load, Options, Quit.
+# At the title screen it has 3: New, Options, Quit.
+function menu_main_in_level()
+    return menu_paused_from_level
+end
+
+function menu_main_count()
+    if menu_main_in_level()
+        return 5
+    end
+    return 3
+end
+
+function menu_item_name(idx)
+    if menu_main_in_level()
+        if idx == 0
+            return "M_NGAME"
+        end
+        if idx == 1
+            return "M_SAVEG"
+        end
+        if idx == 2
+            return "M_LOADG"
+        end
+        if idx == 3
+            return "M_OPTION"
+        end
+        if idx == 4
+            return "M_QUITG"
+        end
+    else
+        if idx == 0
+            return "M_NGAME"
+        end
+        if idx == 1
+            return "M_OPTION"
+        end
+        if idx == 2
+            return "M_QUITG"
+        end
+    end
+    return ""
+end
+
+function menu_adjust(delta)
+    if menu_cursor == OPT_SCRNSIZE
+        opt_screen_size = opt_screen_size + delta
+        if opt_screen_size < 4
+            opt_screen_size = 4
+        end
+        if opt_screen_size > 11
+            opt_screen_size = 11
+        end
+    end
+    if menu_cursor == OPT_MSENS
+        opt_mouse_sens = opt_mouse_sens + delta
+        if opt_mouse_sens < 0
+            opt_mouse_sens = 0
+        end
+        if opt_mouse_sens > 9
+            opt_mouse_sens = 9
+        end
+    end
+    if menu_cursor == OPT_SFXVOL
+        opt_sfx_volume = opt_sfx_volume + delta
+        if opt_sfx_volume < 0
+            opt_sfx_volume = 0
+        end
+        if opt_sfx_volume > 15
+            opt_sfx_volume = 15
+        end
+        # Preview the change immediately
+        audio_play_sfx(SFX_PSTOP)
+    end
+    if menu_cursor == OPT_MUSVOL
+        opt_music_volume = opt_music_volume + delta
+        if opt_music_volume < 0
+            opt_music_volume = 0
+        end
+        if opt_music_volume > 15
+            opt_music_volume = 15
+        end
+        audio_apply_music_volume()
+    end
+    if menu_cursor == OPT_CROSSHAIR
+        opt_crosshair = not opt_crosshair
+    end
+    if menu_cursor == OPT_MESSAGES
+        opt_messages = not opt_messages
+    end
+    if menu_cursor == OPT_DETAIL
+        opt_detail_high = not opt_detail_high
+    end
+    # Persist on every adjustment so settings survive a hard quit
+    options_save()
+end
+
+function menu_select()
+    if menu_state == MENU_MAIN
+        # Snapshot cursor before any branch can mutate it — guards against
+        # an `if/end` chain re-matching after we set menu_cursor inside one
+        # of the arms.
+        local pick = menu_cursor
+        if menu_main_in_level()
+            if pick == 0
+                # Confirm before discarding the current run
+                menu_confirm_text = "Are you sure? This will end your game."
+                menu_confirm_action = "newgame"
+                menu_confirm_return = MENU_MAIN
+                menu_confirm_cursor_save = 0
+                menu_state = MENU_CONFIRM
+                menu_cursor = 1   # Default to NO
+            elif pick == 1
+                menu_state = MENU_SAVE
+                menu_cursor = 0
+            elif pick == 2
+                menu_state = MENU_LOAD
+                menu_cursor = 0
+            elif pick == 3
+                menu_state = MENU_OPTIONS
+                menu_cursor = 0
+            elif pick == 4
+                # Quit confirm
+                menu_confirm_text = "Really quit?"
+                menu_confirm_action = "quit"
+                menu_confirm_return = MENU_MAIN
+                menu_confirm_cursor_save = 4
+                menu_state = MENU_CONFIRM
+                menu_cursor = 1
+            end
+        else
+            if pick == 0
+                menu_state = MENU_EPISODE
+                menu_cursor = menu_first_available_episode()
+            elif pick == 1
+                menu_state = MENU_OPTIONS
+                menu_cursor = 0
+            elif pick == 2
+                # Quit confirm
+                menu_confirm_text = "Really quit?"
+                menu_confirm_action = "quit"
+                menu_confirm_return = MENU_MAIN
+                menu_confirm_cursor_save = 2
+                menu_state = MENU_CONFIRM
+                menu_cursor = 1
+            end
+        end
+    elif menu_state == MENU_EPISODE
+        if menu_episode_available(menu_cursor)
+            menu_chosen_episode = menu_cursor + 1
+            menu_state = MENU_SKILL
+            menu_cursor = 2  # Default to Hurt Me Plenty
+        end
+    elif menu_state == MENU_SKILL
+        local skill = menu_cursor + 1
+        game_set_skill(skill)
+        menu_paused_from_level = false
+        game_load_map(format("E{}M1", menu_chosen_episode))
+    elif menu_state == MENU_SAVE
+        # Slot index in picker is 0..5; saved slots are 1..6
+        local slot = menu_cursor + 1
+        if save_slot_label(slot) != "EMPTY"
+            # Non-empty — confirm overwrite
+            menu_confirm_text = format("Overwrite slot {}?", slot)
+            menu_confirm_action = format("save_slot_{}", slot)
+            menu_confirm_return = MENU_SAVE
+            menu_confirm_cursor_save = menu_cursor
+            menu_state = MENU_CONFIRM
+            menu_cursor = 1   # Default to NO
+        else
+            save_game_to_slot(slot)
+            menu_state = MENU_MAIN
+            menu_cursor = 1
+            menu_paused_from_level = false
+            game_set_state(GS_LEVEL)
+        end
+    elif menu_state == MENU_CONFIRM
+        if menu_cursor == 0
+            # YES — execute the deferred action
+            if substr(menu_confirm_action, 0, 5) == "save_"
+                local slot_str = substr(menu_confirm_action, 10, strlen(menu_confirm_action) - 10)
+                local slot = int(slot_str)
+                save_game_to_slot(slot)
+                menu_state = MENU_MAIN
+                menu_cursor = 1
+                menu_paused_from_level = false
+                game_set_state(GS_LEVEL)
+            elif substr(menu_confirm_action, 0, 7) == "delete_"
+                # delete_slot_N
+                local slot_str = substr(menu_confirm_action, 12, strlen(menu_confirm_action) - 12)
+                local slot = int(slot_str)
+                delete_slot(slot)
+                # Return to the picker (caller had it set)
+                menu_state = menu_confirm_return
+                menu_cursor = menu_confirm_cursor_save
+            elif menu_confirm_action == "newgame"
+                # Drop into episode picker — discard current level
+                menu_state = MENU_EPISODE
+                menu_cursor = menu_first_available_episode()
+            elif menu_confirm_action == "quit"
+                exit(0)
+            end
+        else
+            # NO — return to picker
+            menu_state = menu_confirm_return
+            menu_cursor = menu_confirm_cursor_save
+        end
+    elif menu_state == MENU_LOAD
+        if load_game_from_slot(menu_cursor + 1)
+            menu_state = MENU_MAIN
+            menu_cursor = 0
+            menu_paused_from_level = false
+            # load_game_from_slot already set GS_LEVEL
+        end
+    elif menu_state == MENU_OPTIONS
+        # Boolean toggles + sliders are handled by menu_adjust on Left/Right
+        # AND on Enter (via menu_read_input). Only the End Game item needs
+        # special Enter handling here.
+        if menu_cursor == OPT_ENDGAME
+            menu_state = MENU_MAIN
+            if menu_main_in_level()
+                menu_cursor = 3
+            else
+                menu_cursor = 1
+            end
+        else
+            menu_adjust(1)
+        end
+    end
+end

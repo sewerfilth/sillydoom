@@ -1,0 +1,288 @@
+# menu_draw.is — Doom menu rendering (split out so all functions resolve)
+
+# Animated skull cursor — used by every menu screen as the selection marker.
+function menu_draw_skull(fb, x, y)
+    local skull_name = "M_SKULL1"
+    if (menu_skull_tic / 8) % 2 == 1
+        skull_name = "M_SKULL2"
+    end
+    doomDrawPatch(fb, skull_name, x, y)
+end
+
+function menu_draw_main(fb, fnt)
+    # In-level main menu draws on top of a dimmed game frame; the title menu
+    # gets a real TITLEPIC backdrop.
+    if menu_main_in_level()
+        # Dim background — simple dark wash
+        fb.clear(0.0, 0.0, 0.0, 0.6)
+        # Vanilla pause graphic at the top of the playfield. Drawn here
+        # so it appears whenever the menu is up over a paused level.
+        doomDrawPatch(fb, "M_PAUSE", 116, 8)
+    else
+        doomDrawPatch(fb, "TITLEPIC", 0, 0)
+    end
+    doomDrawPatch(fb, "M_DOOM", 94, 2)
+
+    local count = menu_main_count()
+    local i = 0
+    while i < count
+        local item_y = MENU_Y_START + i * MENU_Y_STEP
+        local lump = menu_item_name(i)
+        doomDrawPatch(fb, lump, MENU_X, item_y)
+        i = i + 1
+    end
+
+    menu_draw_skull(fb, MENU_X - 32, MENU_Y_START + menu_cursor * MENU_Y_STEP - 3)
+end
+
+function menu_draw_slider(fb, x, y, segments, value, max_value)
+    doomDrawPatch(fb, "M_THERML", x, y)
+    local seg = 0
+    while seg < segments
+        doomDrawPatch(fb, "M_THERMM", x + 8 + seg * 8, y)
+        seg = seg + 1
+    end
+    doomDrawPatch(fb, "M_THERMR", x + 8 + segments * 8, y)
+    local thumb_pos = (value * segments) / max_value
+    if thumb_pos < 0
+        thumb_pos = 0
+    end
+    if thumb_pos >= segments
+        thumb_pos = segments - 1
+    end
+    doomDrawPatch(fb, "M_THERMO", x + 8 + thumb_pos * 8, y)
+end
+
+function menu_draw_options(fb, fnt)
+    doomDrawPatch(fb, "TITLEPIC", 0, 0)
+    doomDrawPatch(fb, "M_OPTTTL", 108, OPT_Y_TITLE)
+    doomDrawPatch(fb, "M_ENDGAM", OPT_X, OPT_Y_ENDGAME)
+
+    doomDrawPatch(fb, "M_MESSG", OPT_X, OPT_Y_MESSAGES)
+    if opt_messages
+        doomDrawPatch(fb, "M_MSGON", OPT_X + 120, OPT_Y_MESSAGES)
+    else
+        doomDrawPatch(fb, "M_MSGOFF", OPT_X + 120, OPT_Y_MESSAGES)
+    end
+
+    doomDrawPatch(fb, "M_DETAIL", OPT_X, OPT_Y_DETAIL)
+    if opt_detail_high
+        doomDrawPatch(fb, "M_GDHIGH", OPT_X + 175, OPT_Y_DETAIL)
+    else
+        doomDrawPatch(fb, "M_GDLOW", OPT_X + 175, OPT_Y_DETAIL)
+    end
+
+    # Crosshair toggle (no vanilla patch — draw with text + ON/OFF lumps)
+    fb.text(fnt, "CROSSHAIR", OPT_X, OPT_Y_CROSSHAIR, 0.85, 0.7, 0.0, 1.0)
+    if opt_crosshair
+        doomDrawPatch(fb, "M_MSGON", OPT_X + 120, OPT_Y_CROSSHAIR)
+    else
+        doomDrawPatch(fb, "M_MSGOFF", OPT_X + 120, OPT_Y_CROSSHAIR)
+    end
+
+    doomDrawPatch(fb, "M_SCRNSZ", OPT_X, OPT_Y_SCRNSIZE)
+    menu_draw_slider(fb, OPT_X, OPT_Y_SCRNSLDR, 8, opt_screen_size - 4, 7)
+
+    doomDrawPatch(fb, "M_MSENS", OPT_X, OPT_Y_MSENS)
+    menu_draw_slider(fb, OPT_X, OPT_Y_MSENSLDR, 10, opt_mouse_sens, 9)
+
+    doomDrawPatch(fb, "M_SFXVOL", OPT_X, OPT_Y_SFXVOL)
+    menu_draw_slider(fb, OPT_X, OPT_Y_SFXSLDR, 16, opt_sfx_volume, 15)
+
+    doomDrawPatch(fb, "M_MUSVOL", OPT_X, OPT_Y_MUSVOL)
+    menu_draw_slider(fb, OPT_X, OPT_Y_MUSSLDR, 16, opt_music_volume, 15)
+
+    local cursor_y = OPT_Y_ENDGAME
+    if menu_cursor == OPT_MESSAGES
+        cursor_y = OPT_Y_MESSAGES
+    end
+    if menu_cursor == OPT_DETAIL
+        cursor_y = OPT_Y_DETAIL
+    end
+    if menu_cursor == OPT_CROSSHAIR
+        cursor_y = OPT_Y_CROSSHAIR
+    end
+    if menu_cursor == OPT_SCRNSIZE
+        cursor_y = OPT_Y_SCRNSIZE
+    end
+    if menu_cursor == OPT_MSENS
+        cursor_y = OPT_Y_MSENS
+    end
+    if menu_cursor == OPT_SFXVOL
+        cursor_y = OPT_Y_SFXVOL
+    end
+    if menu_cursor == OPT_MUSVOL
+        cursor_y = OPT_Y_MUSVOL
+    end
+
+    menu_draw_skull(fb, OPT_X - 32, cursor_y - 5)
+end
+
+# Highlight bar drawn under the currently-selected menu item.
+# Just a translucent yellow strip — visible against TITLEPIC backdrop.
+function menu_draw_hover_bar(fb, x, y, w, h)
+    local row = 0
+    while row < h
+        fb.line(x, y + row, x + w - 1, y + row, 1.0, 0.85, 0.2, 0.25)
+        row = row + 1
+    end
+end
+
+function menu_draw_episode(fb, fnt)
+    # TITLEPIC backdrop (vanilla puts the menu over it)
+    doomDrawPatch(fb, "TITLEPIC", 0, 0)
+    doomDrawPatch(fb, "M_EPISOD", 54, 38)
+
+    local names = {}
+    names["0"] = "M_EPI1"
+    names["1"] = "M_EPI2"
+    names["2"] = "M_EPI3"
+    names["3"] = "M_EPI4"
+
+    # Highlight strip behind the active row
+    local hy = EPI_Y_START + menu_cursor * EPI_Y_STEP - 2
+    menu_draw_hover_bar(fb, EPI_X - 4, hy, 220, EPI_Y_STEP - 2)
+
+    local i = 0
+    while i < EPISODE_ITEMS_COUNT
+        local y = EPI_Y_START + i * EPI_Y_STEP
+        if menu_episode_available(i)
+            doomDrawPatch(fb, names[format("{}", i)], EPI_X, y)
+        end
+        i = i + 1
+    end
+
+    menu_draw_skull(fb, EPI_X - 32, EPI_Y_START + menu_cursor * EPI_Y_STEP - 5)
+end
+
+function menu_draw_skill(fb, fnt)
+    doomDrawPatch(fb, "TITLEPIC", 0, 0)
+    doomDrawPatch(fb, "M_NEWG",  96, 14)
+    doomDrawPatch(fb, "M_SKILL", 54, 38)
+
+    local names = {}
+    names["0"] = "M_JKILL"
+    names["1"] = "M_ROUGH"
+    names["2"] = "M_HURT"
+    names["3"] = "M_ULTRA"
+    names["4"] = "M_NMARE"
+
+    local hy = SKILL_Y_START + menu_cursor * SKILL_Y_STEP - 2
+    menu_draw_hover_bar(fb, SKILL_X - 4, hy, 220, SKILL_Y_STEP - 2)
+
+    local i = 0
+    while i < SKILL_ITEMS_COUNT
+        local y = SKILL_Y_START + i * SKILL_Y_STEP
+        doomDrawPatch(fb, names[format("{}", i)], SKILL_X, y)
+        i = i + 1
+    end
+
+    menu_draw_skull(fb, SKILL_X - 32, SKILL_Y_START + menu_cursor * SKILL_Y_STEP - 5)
+end
+
+SLOT_Y_START = 26
+SLOT_Y_STEP  = 24
+SLOT_X       = 60
+THUMB_PIXEL_W = 64
+THUMB_PIXEL_H = 40
+
+function menu_draw_slots(fb, fnt, title_lump)
+    doomDrawPatch(fb, "TITLEPIC", 0, 0)
+    doomDrawPatch(fb, title_lump, 72, 8)
+
+    # Highlight strip behind the active slot
+    local hy = SLOT_Y_START + menu_cursor * SLOT_Y_STEP - 2
+    menu_draw_hover_bar(fb, SLOT_X - 4, hy, 210, SLOT_Y_STEP - 2)
+
+    local i = 0
+    while i < SLOT_ITEMS_COUNT
+        local y = SLOT_Y_START + i * SLOT_Y_STEP
+        local x0 = SLOT_X
+        local x1 = SLOT_X + 200
+        # Slot border box
+        fb.line(x0, y - 2, x1, y - 2, 0.5, 0.5, 0.5, 1.0)
+        fb.line(x0, y + 20, x1, y + 20, 0.5, 0.5, 0.5, 1.0)
+        fb.line(x0, y - 2, x0, y + 20, 0.5, 0.5, 0.5, 1.0)
+        fb.line(x1, y - 2, x1, y + 20, 0.5, 0.5, 0.5, 1.0)
+        # Thumbnail (left) + label (right)
+        local thumb_path = save_slot_thumb_path(i + 1)
+        if pathExists(thumb_path)
+            doomLoadThumb(fb, thumb_path, x0 + 2, y - 1)
+        end
+        local label = save_slot_label(i + 1)
+        fb.text(fnt, format("{}. {}", i + 1, label), x0 + 72, y + 6, 1.0, 1.0, 0.6, 1.0)
+        i = i + 1
+    end
+
+    menu_draw_skull(fb, SLOT_X - 32, SLOT_Y_START + menu_cursor * SLOT_Y_STEP + 4)
+
+    # Hint: DELETE clears a slot
+    fb.text(fnt, "DEL: clear   ESC: back", 80, 192, 0.8, 0.8, 0.6, 1.0)
+end
+
+function menu_draw_confirm(fb, fnt)
+    # Modal box centered on screen
+    local cx = 160
+    local cy = 100
+    local bw = 200
+    local bh = 50
+    local x0 = cx - bw / 2
+    local y0 = cy - bh / 2
+    local x1 = x0 + bw
+    local y1 = y0 + bh
+
+    # Background fill (black) + border
+    local y = y0
+    while y < y1
+        fb.line(x0, y, x1, y, 0.0, 0.0, 0.0, 0.85)
+        y = y + 1
+    end
+    fb.line(x0, y0, x1, y0, 1.0, 1.0, 0.4, 1.0)
+    fb.line(x0, y1, x1, y1, 1.0, 1.0, 0.4, 1.0)
+    fb.line(x0, y0, x0, y1, 1.0, 1.0, 0.4, 1.0)
+    fb.line(x1, y0, x1, y1, 1.0, 1.0, 0.4, 1.0)
+
+    # Prompt text
+    fb.text(fnt, menu_confirm_text, x0 + 10, y0 + 8, 1.0, 1.0, 1.0, 1.0)
+
+    # YES / NO row
+    local yes_x = x0 + 40
+    local no_x  = x0 + 120
+    local choice_y = y0 + 28
+    if menu_cursor == 0
+        fb.text(fnt, "> YES", yes_x, choice_y, 1.0, 1.0, 0.4, 1.0)
+        fb.text(fnt, "  NO",  no_x,  choice_y, 0.7, 0.7, 0.7, 1.0)
+    else
+        fb.text(fnt, "  YES", yes_x, choice_y, 0.7, 0.7, 0.7, 1.0)
+        fb.text(fnt, "> NO",  no_x,  choice_y, 1.0, 1.0, 0.4, 1.0)
+    end
+end
+
+function menu_draw(fb, fnt)
+    menu_skull_tic = menu_skull_tic + 1
+    if menu_state == MENU_MAIN
+        menu_draw_main(fb, fnt)
+    elif menu_state == MENU_EPISODE
+        menu_draw_episode(fb, fnt)
+    elif menu_state == MENU_SKILL
+        menu_draw_skill(fb, fnt)
+    elif menu_state == MENU_OPTIONS
+        menu_draw_options(fb, fnt)
+    elif menu_state == MENU_SAVE
+        menu_draw_slots(fb, fnt, "M_SAVEG")
+    elif menu_state == MENU_LOAD
+        menu_draw_slots(fb, fnt, "M_LOADG")
+    elif menu_state == MENU_CONFIRM
+        # Backdrop = whichever screen launched the modal
+        if menu_confirm_return == MENU_LOAD
+            menu_draw_slots(fb, fnt, "M_LOADG")
+        elif menu_confirm_return == MENU_SAVE
+            menu_draw_slots(fb, fnt, "M_SAVEG")
+        elif menu_paused_from_level
+            fb.clear(0.0, 0.0, 0.0, 0.6)
+        else
+            doomDrawPatch(fb, "TITLEPIC", 0, 0)
+        end
+        menu_draw_confirm(fb, fnt)
+    end
+end

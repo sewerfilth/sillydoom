@@ -1,0 +1,186 @@
+# sillydoom — Doom ported to the isilly engine
+#
+# Desktop controls:
+#   WASD / Arrows  Move        Mouse        Look
+#   Space          Use         Mouse-L / X  Fire
+#   1-7            Weapon      Q/E          Prev/Next weapon
+#   Tab            Automap     ./-          Automap zoom
+#   ESC            Menu        K / L        Quicksave / Quickload
+#   P              Screenshot
+
+require("gpu")
+require("platform_windowing")
+require("platform_input")
+require("doom_wad")
+
+dofile("src/map.is")
+dofile("src/render.is")
+dofile("src/player.is")
+dofile("src/things_defs.is")
+dofile("src/things_logic.is")
+dofile("src/weapon.is")
+dofile("src/specials.is")
+dofile("src/hud.is")
+dofile("src/automap.is")
+dofile("src/menu.is")
+dofile("src/menu_draw.is")
+dofile("src/intermission.is")
+dofile("src/finale.is")
+dofile("src/messages.is")
+dofile("src/anim.is")
+dofile("src/audio.is")
+dofile("src/game.is")
+dofile("src/save_load.is")
+
+# -- Config -----------------------------------------------------------
+
+configLoad(".")
+TITLE  = configGetString("app.title", "sillydoom")
+WIDTH  = configGetInt("app.width", 1280)
+HEIGHT = configGetInt("app.height", 720)
+RW     = configGetInt("render.width", 320)
+RH     = configGetInt("render.height", 200)
+
+# -- WAD loading ------------------------------------------------------
+
+wad = wadOpen("assets/DOOM.WAD")
+if wad == none
+    wad = wadOpen("assets/DOOM1.WAD")
+end
+if wad == none
+    print("ERROR: WAD not found in assets/")
+    exit(1)
+end
+
+print(format("WAD loaded: {} lumps", wadLumpCount(wad)))
+
+# -- Framebuffers + engine systems -----------------------------------
+
+fb_render = framebuffer(RW, RH)
+fb_out    = framebuffer(WIDTH, HEIGHT)
+cam = camera3d(90, 0.1, 1000)
+
+# -- Init subsystems --------------------------------------------------
+
+game_init(wad)
+audio_init(wad)
+menu_init(wad)
+render_init(wad, fb_render, RW, RH)
+hud_init(wad, RW, RH)
+# Restore persisted menu options (volume, screen size, etc.) before
+# the player ever sees the title screen.
+options_load()
+
+# -- Window -----------------------------------------------------------
+
+win = windowCreate(TITLE, WIDTH, HEIGHT)
+fnt = font()
+t   = timer(60)
+
+game_set_state(GS_MENU)
+
+# =====================================================================
+# GAME LOOP
+# =====================================================================
+
+running = true
+while running
+    dt = tick(t)
+    inputUpdate()
+
+    if not windowPoll(win)
+        running = false
+    end
+
+    # -- Input ----
+    if game_state() == GS_LEVEL
+        player_read_input()
+        if keyJustPressed(KEY_TAB) or keyJustPressed(KEY_Z)
+            automap_toggle()
+        end
+        automap_input()
+        # K = quicksave, L = quickload, P = screenshot
+        if keyJustPressed(KEY_K)
+            save_game()
+        end
+        if keyJustPressed(KEY_L)
+            load_game()
+        end
+        if keyJustPressed(KEY_P)
+            take_screenshot()
+        end
+        # Death respawn — Space attempts quickload, falls back to restarting the level
+        if player_dead and (keyJustPressed(KEY_SPACE) or keyJustPressed(KEY_RETURN))
+            if not load_game()
+                game_load_map(g_map_name)
+            end
+        end
+    end
+
+    if game_state() == GS_MENU
+        menu_read_input()
+    end
+
+    if game_state() == GS_INTERMISSION
+        inter_input()
+    end
+
+    if game_state() == GS_FINALE
+        finale_input()
+    end
+
+    # -- ESC handling ----
+    if keyJustPressed(KEY_ESCAPE)
+        if game_state() == GS_LEVEL and automap_on
+            automap_toggle()
+        elif game_state() == GS_LEVEL
+            menu_paused_from_level = true
+            menu_state = MENU_MAIN
+            menu_cursor = 0
+            game_set_state(GS_MENU)
+        elif game_state() == GS_MENU
+            if not menu_back()
+                running = false
+            end
+        else
+            running = false
+        end
+    end
+
+    # -- Tick (35 Hz fixed) ----
+    game_accumulate(dt)
+    while game_should_tick()
+        game_tick()
+    end
+
+    # -- Audio listener follows player ----
+    audio_update_listener(player_x, player_y, player_angle)
+
+    # -- Render ----
+    if game_state() == GS_LEVEL
+        render_frame(fb_render, cam)
+        automap_draw(fb_render, RW, RH)
+        hud_draw(fb_render, fnt)
+        msg_draw(fb_render, fnt)
+    end
+    if game_state() == GS_MENU
+        menu_draw(fb_render, fnt)
+    end
+    if game_state() == GS_INTERMISSION
+        inter_draw(fb_render, fnt)
+    end
+    if game_state() == GS_FINALE
+        finale_draw(fb_render, fnt)
+    end
+
+    # Nearest-neighbor upscale keeps pixel art crisp; Lanczos blurred
+    # menu text and HUD numerics noticeably at 4x.
+    fb_out.blitScaled(fb_render, 0, 0, WIDTH, HEIGHT, 0)
+    windowPresent(win, fb_out)
+end
+
+# -- Shutdown --
+options_save()
+audio_shutdown()
+wadClose(wad)
+print(format("{} exited", TITLE))

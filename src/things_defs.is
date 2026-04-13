@@ -1,0 +1,583 @@
+# things_defs.is — Actors, monsters, items, projectiles
+#
+# Per-type data lives in declarative tables keyed by "type number as
+# string" (isilly tables use string keys). Accessor functions are thin
+# wrappers around those tables, so adding a new monster or item only
+# requires editing data, not control flow.
+#
+# Re-enable safe now that the underlying isilly_table_set bug (key
+# pointers were stored without strdup, so format("{}", x) keys went
+# dangling) is fixed. The gameplay invariant test in tests/run_tests.sh
+# section 6.5 catches any regression in sprite name resolution.
+#
+# things_active uses string keys: things_active[format("{}", i)]
+
+THING_PLAYER1    = 1
+THING_PLAYER2    = 2
+THING_PLAYER3    = 3
+THING_PLAYER4    = 4
+THING_ZOMBIEMAN  = 3004
+THING_SHOTGUNNER = 9
+THING_IMP        = 3001
+THING_DEMON      = 3002
+THING_SPECTRE    = 58    # Same stats as DEMON but rendered with FUZZ
+THING_BARON      = 3003
+THING_CACO       = 3005
+THING_SOUL       = 3006
+THING_SPIDER     = 7
+THING_CYBER      = 16
+
+THING_STIMPACK    = 2011
+THING_MEDIKIT     = 2012
+THING_ARMOR_G     = 2018
+THING_ARMOR_B     = 2019
+THING_SHOTGUN     = 2001
+THING_CHAINGUN    = 2002
+THING_LAUNCHER    = 2003
+THING_PLASMA      = 2004
+THING_BFG         = 2006
+THING_CHAINSAW    = 2005
+THING_HEALTH_BONUS = 2014
+THING_ARMOR_BONUS  = 2015
+THING_SOULSPHERE  = 2013
+THING_MEGASPHERE  = 83
+THING_INVULN      = 2022
+THING_BERSERK     = 2023
+THING_INVIS       = 2024
+THING_RADSUIT     = 2025
+THING_ALLMAP      = 2026
+THING_VISOR       = 2045
+THING_BLUE_KEY    = 5
+THING_YELLOW_KEY  = 6
+THING_RED_KEY     = 13
+THING_TELEDEST    = 14
+THING_BARREL      = 2035
+THING_AMMO_CLIP   = 2007
+THING_AMMO_SHELL  = 2008
+THING_AMMO_ROCKET = 2010
+THING_AMMO_CELL   = 2047
+THING_AMMO_BOX_CLIP   = 2048
+THING_AMMO_BOX_SHELL  = 2049
+THING_AMMO_BOX_ROCKET = 2046
+THING_AMMO_BOX_CELL   = 17     # Energy cell pack
+THING_BACKPACK        = 8      # Doubles ammo caps + gives one of each
+
+# Thing flags (from the WAD's actor flag word)
+TF_SOLID     = 1
+TF_SHOOTABLE = 2
+TF_PICKUP    = 4
+TF_MISSILE   = 8
+TF_MONSTER   = 16
+
+# Map-thing skill flags (from the WAD THINGS lump's flag word — these
+# live in a different field than TF_* and have different bit values)
+MTF_EASY     = 1   # Appears in skill 1 + 2
+MTF_NORMAL   = 2   # Appears in skill 3
+MTF_HARD     = 4   # Appears in skill 4 + 5
+MTF_AMBUSH   = 8   # Deaf monster
+MTF_MULTI    = 16  # Multiplayer-only
+
+AI_IDLE    = 0
+AI_SEE     = 1
+AI_CHASE   = 2
+AI_MELEE   = 3
+AI_MISSILE = 4
+AI_PAIN    = 5
+AI_DEATH   = 6
+AI_DEAD    = 7
+
+things_active = {}
+things_count  = 0
+
+# ── Per-monster data ────────────────────────────────────────────────
+#
+# MONSTER_INFO[type_str] = {
+#   health, speed, radius, height, damage, pain_chance, attack_rate,
+#   floats, melee, sprite,
+#   see_snd, atk_snd, die_snd, pain_snd,
+# }
+#
+# Sourced from vanilla mobjinfo + S_*_SEE/S_*_DIE state chains. Empty
+# string in a sound field means "no sound for this monster" — vanilla
+# Lost Soul / Spider / Cyberdemon use different sound logic that's
+# easier to handle as a noop than to special-case.
+MONSTER_INFO = {}
+
+function _mdef(type, info)
+    MONSTER_INFO[format("{}", type)] = info
+end
+
+_mdef(THING_ZOMBIEMAN, {
+    health = 20, speed = 1.5, radius = 20, height = 56,
+    damage = 3, pain_chance = 200, attack_rate = 35,
+    floats = false, melee = false,
+    sprite = "POSS",
+    see_snd = "DSPOSIT1", atk_snd = "DSPISTOL",
+    die_snd = "DSPODTH1", pain_snd = "DSPOPAIN",
+})
+_mdef(THING_SHOTGUNNER, {
+    health = 30, speed = 1.5, radius = 20, height = 56,
+    damage = 5, pain_chance = 170, attack_rate = 50,
+    floats = false, melee = false,
+    sprite = "SPOS",
+    see_snd = "DSPOSIT2", atk_snd = "DSSHOTGN",
+    die_snd = "DSPODTH2", pain_snd = "DSPOPAIN",
+})
+_mdef(THING_IMP, {
+    health = 60, speed = 2.0, radius = 20, height = 56,
+    damage = 8, pain_chance = 200, attack_rate = 25,
+    floats = false, melee = false,
+    sprite = "TROO",
+    see_snd = "DSBGSIT1", atk_snd = "DSFIRSHT",
+    die_snd = "DSBGDTH1", pain_snd = "DSBGPAIN",
+})
+_mdef(THING_DEMON, {
+    health = 150, speed = 3.0, radius = 20, height = 56,
+    damage = 10, pain_chance = 180, attack_rate = 15,
+    floats = false, melee = true,
+    sprite = "SARG",
+    see_snd = "DSSGTSIT", atk_snd = "DSSGTATK",
+    die_snd = "DSSGTDTH", pain_snd = "DSDMPAIN",
+})
+_mdef(THING_CACO, {
+    health = 400, speed = 2.0, radius = 31, height = 56,
+    damage = 10, pain_chance = 128, attack_rate = 30,
+    floats = true, melee = false,
+    sprite = "HEAD",
+    see_snd = "DSCACSIT", atk_snd = "DSFIRSHT",
+    die_snd = "DSCACDTH", pain_snd = "DSPEPAIN",
+})
+_mdef(THING_BARON, {
+    health = 1000, speed = 2.0, radius = 24, height = 64,
+    damage = 15, pain_chance = 50, attack_rate = 30,
+    floats = false, melee = false,
+    sprite = "BOSS",
+    see_snd = "DSBRSSIT", atk_snd = "DSFIRSHT",
+    die_snd = "DSBRSDTH", pain_snd = "DSBGPAIN",
+})
+_mdef(THING_SOUL, {
+    health = 100, speed = 4.0, radius = 20, height = 56,
+    damage = 3, pain_chance = 256, attack_rate = 35,
+    floats = true, melee = true,
+    sprite = "SKUL",
+    see_snd = "", atk_snd = "",
+    die_snd = "", pain_snd = "",
+})
+_mdef(THING_SPIDER, {
+    health = 3000, speed = 3.0, radius = 128, height = 100,
+    damage = 3, pain_chance = 40, attack_rate = 35,
+    floats = false, melee = false,
+    sprite = "SPID",
+    see_snd = "", atk_snd = "",
+    die_snd = "", pain_snd = "",
+})
+_mdef(THING_CYBER, {
+    health = 4000, speed = 4.0, radius = 40, height = 110,
+    damage = 40, pain_chance = 20, attack_rate = 35,
+    floats = false, melee = false,
+    sprite = "CYBR",
+    see_snd = "", atk_snd = "",
+    die_snd = "", pain_snd = "",
+})
+# Barrel — shootable but not a monster. Has just enough fields to keep
+# thing_spawn happy and let weapon_trace_line treat it as a target.
+_mdef(THING_BARREL, {
+    health = 20, speed = 0, radius = 10, height = 42,
+    damage = 0, pain_chance = 0, attack_rate = 35,
+    floats = false, melee = false,
+    sprite = "BAR1",
+    see_snd = "", atk_snd = "",
+    die_snd = "", pain_snd = "",
+})
+
+# Collapse alias variants (e.g. spectre is a render-only variant of demon)
+# down to the canonical type used by per-stat lookups.
+function thing_base_type(type)
+    if type == THING_SPECTRE
+        return THING_DEMON
+    end
+    return type
+end
+
+# Generic field accessor — returns row[field], or default if either the
+# row or the field is absent.
+function _minfo_field(type, field, default)
+    type = thing_base_type(type)
+    local row = MONSTER_INFO[format("{}", type)]
+    if row == none
+        return default
+    end
+    local v = row[field]
+    if v == none
+        return default
+    end
+    return v
+end
+
+function thing_default_health(type)
+    return _minfo_field(type, "health", 0)
+end
+function thing_default_speed(type)
+    return _minfo_field(type, "speed", 0)
+end
+function thing_default_radius(type)
+    return _minfo_field(type, "radius", 20)
+end
+function thing_default_height(type)
+    return _minfo_field(type, "height", 56)
+end
+function thing_default_damage(type)
+    return _minfo_field(type, "damage", 0)
+end
+function thing_default_pain(type)
+    return _minfo_field(type, "pain_chance", 0)
+end
+function thing_attack_rate(type)
+    return _minfo_field(type, "attack_rate", 35)
+end
+
+function thing_floats(type)
+    return _minfo_field(type, "floats", false)
+end
+
+function thing_is_melee(type)
+    return _minfo_field(type, "melee", false)
+end
+
+function thing_attack_dist(type)
+    if thing_is_melee(type)
+        return 80
+    end
+    return 512
+end
+
+# ── Pickup classification ───────────────────────────────────────────
+#
+# A small set of type ids that should get TF_PICKUP. Centralised so
+# `thing_default_flags` is one table lookup instead of a dozen branch
+# tests against id ranges.
+PICKUP_IDS = {}
+function _pickup(type)
+    PICKUP_IDS[format("{}", type)] = true
+end
+
+_pickup(THING_STIMPACK)     _pickup(THING_MEDIKIT)
+_pickup(THING_ARMOR_G)      _pickup(THING_ARMOR_B)
+_pickup(THING_SHOTGUN)      _pickup(THING_CHAINGUN)
+_pickup(THING_LAUNCHER)     _pickup(THING_PLASMA)
+_pickup(THING_BFG)          _pickup(THING_CHAINSAW)
+_pickup(THING_HEALTH_BONUS) _pickup(THING_ARMOR_BONUS)
+_pickup(THING_SOULSPHERE)   _pickup(THING_MEGASPHERE)
+_pickup(THING_INVULN)       _pickup(THING_BERSERK)
+_pickup(THING_INVIS)        _pickup(THING_RADSUIT)
+_pickup(THING_ALLMAP)       _pickup(THING_VISOR)
+_pickup(THING_BLUE_KEY)     _pickup(THING_YELLOW_KEY)
+_pickup(THING_RED_KEY)
+_pickup(THING_AMMO_CLIP)    _pickup(THING_AMMO_SHELL)
+_pickup(THING_AMMO_ROCKET)  _pickup(THING_AMMO_CELL)
+_pickup(THING_AMMO_BOX_CLIP)   _pickup(THING_AMMO_BOX_SHELL)
+_pickup(THING_AMMO_BOX_ROCKET) _pickup(THING_AMMO_BOX_CELL)
+_pickup(THING_BACKPACK)
+
+function thing_default_flags(type)
+    if type == THING_TELEDEST
+        return 0
+    end
+    if MONSTER_INFO[format("{}", thing_base_type(type))] != none
+        # Barrel is shootable but not a monster.
+        if type == THING_BARREL
+            return TF_SOLID + TF_SHOOTABLE
+        end
+        return TF_SOLID + TF_SHOOTABLE + TF_MONSTER
+    end
+    if PICKUP_IDS[format("{}", type)] == true
+        return TF_PICKUP
+    end
+    return TF_SOLID
+end
+
+# ── Sprite prefixes ─────────────────────────────────────────────────
+#
+# 4-char WAD lump prefix per thing type. thing_sprite_name appends an
+# animation frame letter and "0".
+SPRITE_PREFIX = {}
+function _spfx(type, name)
+    SPRITE_PREFIX[format("{}", type)] = name
+end
+
+# Monsters
+_spfx(THING_ZOMBIEMAN,  "POSS")
+_spfx(THING_SHOTGUNNER, "SPOS")
+_spfx(THING_IMP,        "TROO")
+_spfx(THING_DEMON,      "SARG")
+_spfx(THING_SPECTRE,    "SARG")  # render mode handles invisibility
+_spfx(THING_BARON,      "BOSS")
+_spfx(THING_CACO,       "HEAD")
+_spfx(THING_SOUL,       "SKUL")
+_spfx(THING_SPIDER,     "SPID")
+_spfx(THING_CYBER,      "CYBR")
+# Weapons
+_spfx(THING_SHOTGUN,  "SHOT")
+_spfx(THING_CHAINGUN, "MGUN")
+_spfx(THING_LAUNCHER, "LAUN")
+_spfx(THING_PLASMA,   "PLAS")
+_spfx(THING_CHAINSAW, "CSAW")
+_spfx(THING_BFG,      "BFUG")
+# Health / armor / bonuses
+_spfx(THING_STIMPACK,     "STIM")
+_spfx(THING_MEDIKIT,      "MEDI")
+_spfx(THING_ARMOR_G,      "ARM1")
+_spfx(THING_ARMOR_B,      "ARM2")
+_spfx(THING_HEALTH_BONUS, "BON1")
+_spfx(THING_ARMOR_BONUS,  "BON2")
+_spfx(THING_SOULSPHERE,   "SOUL")
+_spfx(THING_MEGASPHERE,   "MEGA")
+# Powerups
+_spfx(THING_INVULN,   "PINV")
+_spfx(THING_BERSERK,  "PSTR")
+_spfx(THING_INVIS,    "PINS")
+_spfx(THING_RADSUIT,  "SUIT")
+_spfx(THING_ALLMAP,   "PMAP")
+_spfx(THING_VISOR,    "PVIS")
+_spfx(THING_BACKPACK, "BPAK")
+# Keys
+_spfx(THING_BLUE_KEY,   "BKEY")
+_spfx(THING_YELLOW_KEY, "YKEY")
+_spfx(THING_RED_KEY,    "RKEY")
+# Ammo
+_spfx(THING_AMMO_CLIP,        "CLIP")
+_spfx(THING_AMMO_SHELL,       "SHEL")
+_spfx(THING_AMMO_ROCKET,      "ROCK")
+_spfx(THING_AMMO_CELL,        "CELL")
+_spfx(THING_AMMO_BOX_CELL,    "CELP")
+_spfx(THING_AMMO_BOX_CLIP,    "AMMO")  # box of bullets
+_spfx(THING_AMMO_BOX_ROCKET,  "BROK")  # box of rockets
+_spfx(THING_AMMO_BOX_SHELL,   "SBOX")  # box of shotgun shells
+# Misc / explosive
+_spfx(THING_BARREL, "BAR1")
+# Decorations (Doom 1) — standard A0 props
+_spfx(25, "POL1")  # impaled human
+_spfx(26, "POL6")  # twitching impaled human
+_spfx(27, "POL4")  # skull on a pole
+_spfx(28, "POL2")  # 5 skulls shish kabob
+_spfx(29, "POL3")  # pile of skulls and candles
+_spfx(30, "COL1")  # tall green column
+_spfx(31, "COL2")  # short green column
+_spfx(32, "COL3")  # tall red column
+_spfx(33, "COL4")  # short red column
+_spfx(34, "CAND")  # candle
+_spfx(35, "CBRA")  # candelabra
+_spfx(36, "COL5")  # short green column w/ heart
+_spfx(37, "COL6")  # short red column w/ skull
+_spfx(41, "CEYE")  # evil eye
+_spfx(42, "FSKU")  # floating skull
+_spfx(43, "TRE1")  # burnt tree
+_spfx(44, "TBLU")  # tall blue torch
+_spfx(45, "TGRN")  # tall green torch
+_spfx(46, "TRED")  # tall red torch
+_spfx(47, "SMIT")  # stalagmite
+_spfx(48, "ELEC")  # tall techno pillar
+_spfx(49, "GOR1")  # hanging victim, twitching
+_spfx(50, "GOR2")  # hanging victim, arms out
+_spfx(51, "GOR3")  # hanging victim, one-legged
+_spfx(52, "GOR4")  # hanging pair of legs
+_spfx(53, "GOR5")  # hanging leg
+_spfx(54, "TRE2")  # large brown tree
+_spfx(55, "SMBT")  # short blue torch
+_spfx(56, "SMGT")  # short green torch
+_spfx(57, "SMRT")  # short red torch
+_spfx(2028, "COLU")  # floor lamp
+
+function thing_sprite_prefix(type)
+    local p = SPRITE_PREFIX[format("{}", type)]
+    if p == none
+        return ""
+    end
+    return p
+end
+
+# Pose-specific decorations and corpses use a non-A frame baked into
+# the lump name (e.g. PLAYN0 for a dead marine). Returns the full
+# lump name, or "" for animated/A0 things.
+DECO_LUMP = {}
+function _deco(type, lump)
+    DECO_LUMP[format("{}", type)] = lump
+end
+
+_deco(10, "PLAYW0")  # bloody mess (variant 1)
+_deco(12, "PLAYN0")  # dead player
+_deco(15, "PLAYN0")  # dead other
+_deco(18, "POSSL0")  # dead former human
+_deco(19, "SPOSL0")  # dead former sergeant
+_deco(20, "TROOM0")  # dead imp
+_deco(21, "SARGN0")  # dead demon
+_deco(22, "HEADL0")  # dead cacodemon
+_deco(24, "POL5A0")  # pool of blood
+
+function thing_decoration_lump(type)
+    local d = DECO_LUMP[format("{}", type)]
+    if d == none
+        return ""
+    end
+    return d
+end
+
+# Animated sprite frame letter based on AI state + tics
+function thing_sprite_frame(th)
+    local frames = "ABCD"
+    if th.ai == AI_IDLE or th.ai == AI_SEE
+        # Walk cycle: A B C D
+        local idx = (th.tics / 4) % 4
+        return charAt(frames, idx)
+    end
+    if th.ai == AI_CHASE
+        local idx = (th.tics / 4) % 4
+        return charAt(frames, idx)
+    end
+    if th.ai == AI_MELEE or th.ai == AI_MISSILE
+        return "E"
+    end
+    if th.ai == AI_PAIN
+        return "G"
+    end
+    if th.ai == AI_DEATH
+        local idx = th.tics / 3
+        if idx > 4
+            idx = 4
+        end
+        local death_frames = "LMNOP"
+        return charAt(death_frames, idx)
+    end
+    if th.ai == AI_DEAD
+        return "P"
+    end
+    return "A"
+end
+
+# Full sprite lump name for a thing (prefix + frame + "0")
+function thing_sprite_name(th)
+    # Projectiles set their own sprite prefix at spawn time so we don't
+    # have to plumb every kind through thing_sprite_prefix.
+    if (th.flags & TF_MISSILE) != 0 and th.sprite_pfx != none
+        return th.sprite_pfx + "A0"
+    end
+    # Pose-specific decorations (corpses, blood pools) use a non-A frame
+    # baked into the lump name. Check before the prefix path so we don't
+    # accidentally append "A0" and miss the cache.
+    local deco = thing_decoration_lump(th.type)
+    if deco != ""
+        return deco
+    end
+    local pfx = thing_sprite_prefix(th.type)
+    if pfx == ""
+        return ""
+    end
+    # Items don't animate — always A0
+    if (th.flags & TF_PICKUP) != 0
+        return pfx + "A0"
+    end
+    # Monsters use animated frames
+    if (th.flags & TF_MONSTER) != 0
+        local frame = thing_sprite_frame(th)
+        return pfx + frame + "0"
+    end
+    # Default
+    return pfx + "A0"
+end
+
+# ── Sound dispatch ──────────────────────────────────────────────────
+#
+# Each sound family pulls from the matching field on MONSTER_INFO. An
+# empty string means "no sound for this monster" (Lost Soul / Spider /
+# Cyberdemon use different sound paths in vanilla).
+function _play_monster_sound(th, field)
+    local snd = _minfo_field(th.type, field, "")
+    if snd != ""
+        audio_play_sfx_pos(snd, th.x, th.y)
+    end
+end
+
+function thing_play_see_sound(th)
+    _play_monster_sound(th, "see_snd")
+end
+function thing_play_attack_sound(th)
+    _play_monster_sound(th, "atk_snd")
+end
+function thing_play_death_sound(th)
+    _play_monster_sound(th, "die_snd")
+end
+function thing_play_pain_sound(th)
+    _play_monster_sound(th, "pain_snd")
+end
+
+# Barrel explosion — damages nearby things and player
+function thing_barrel_explode(barrel)
+    local bx = barrel.x
+    local by = barrel.y
+    local blast_radius = 128
+    local blast_damage = 50
+
+    audio_play_sfx_pos(SFX_BAREXP, bx, by)
+
+    # Damage player if nearby
+    local pdx = player_x - bx
+    local pdy = player_y - by
+    local pdist = sqrt(pdx * pdx + pdy * pdy)
+    if pdist < blast_radius
+        local dmg = blast_damage * (1.0 - pdist / blast_radius)
+        player_take_damage(floor(dmg))
+    end
+
+    # Damage nearby things
+    for i in range(things_count):
+        local th = things_active[format("{}", i)]
+        if th != none
+            if th.health > 0 and th.x != bx and th.y != by
+                local tdx = th.x - bx
+                local tdy = th.y - by
+                local tdist = sqrt(tdx * tdx + tdy * tdy)
+                if tdist < blast_radius
+                    local dmg = blast_damage * (1.0 - tdist / blast_radius)
+                    thing_damage(th, floor(dmg))
+                end
+            end
+        end
+    end
+end
+
+function thing_damage(th, amount)
+    if th.health <= 0
+        return
+    end
+    th.health = th.health - amount
+
+    if th.health <= 0
+        th.health = 0
+        th.ai = AI_DEATH
+        th.tics = 0
+        thing_play_death_sound(th)
+        if (th.flags & TF_MONSTER) != 0
+            g_kill_count = g_kill_count + 1
+            # Drive the "evil grin" face for ~1 second after a kill —
+            # the HUD already checks player_evil_tic, this is the
+            # only place that ever sets it.
+            player_evil_tic = 35
+            # Nightmare: queue this monster for respawn ~12 seconds later
+            if game_skill() == SKILL_NM
+                respawn_queue_add(th.type, th.x, th.y, th.angle * 180 / PI)
+            end
+        end
+        if th.type == THING_BARREL
+            thing_barrel_explode(th)
+        end
+    else
+        if rand() * 256 < th.pain_chance
+            th.ai = AI_PAIN
+            th.tics = 0
+            thing_play_pain_sound(th)
+        elif th.ai == AI_IDLE
+            th.ai = AI_CHASE
+            th.tics = 0
+        end
+    end
+end

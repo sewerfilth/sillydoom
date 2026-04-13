@@ -1,0 +1,404 @@
+# save_load.is — Quicksave + multi-slot save
+#
+# Save format: simple key=value lines, one per line.
+# A save snapshots player state, sector heights, thing positions/states,
+# and W1 trigger flags. Active door/lift/light thinkers are NOT preserved
+# — they reset to inert on load. Good enough for quick saves.
+#
+# Slots:
+#   slot 0       — quicksave (K/L hotkeys)
+#   slot 1..6    — manual slots (in-game save/load picker)
+
+require("platform_io")
+
+NUM_SAVE_SLOTS = 6
+
+g_save_dir   = ""
+
+function save_init()
+    g_save_dir = pathJoin(configDir(), "sillydoom")
+    mkdirP(g_save_dir)
+end
+
+function save_slot_path(slot)
+    if g_save_dir == ""
+        save_init()
+    end
+    if slot == 0
+        return pathJoin(g_save_dir, "quicksave.sav")
+    end
+    return pathJoin(g_save_dir, format("slot{}.sav", slot))
+end
+
+function save_slot_thumb_path(slot)
+    if g_save_dir == ""
+        save_init()
+    end
+    if slot == 0
+        return pathJoin(g_save_dir, "quicksave.thm")
+    end
+    return pathJoin(g_save_dir, format("slot{}.thm", slot))
+end
+
+# -- Options persistence ----------------------------------------------
+#
+# opts.cfg lives next to save slots and uses the same simple key=value
+# format. We persist menu toggles + sliders so they survive a launch.
+
+function options_path()
+    if g_save_dir == ""
+        save_init()
+    end
+    return pathJoin(g_save_dir, "opts.cfg")
+end
+
+function options_save()
+    local path = options_path()
+    local s = ""
+    s = s + format("messages={}\n", _bool_int(opt_messages))
+    s = s + format("detail_high={}\n", _bool_int(opt_detail_high))
+    s = s + format("crosshair={}\n", _bool_int(opt_crosshair))
+    s = s + format("screen_size={}\n", opt_screen_size)
+    s = s + format("mouse_sens={}\n", opt_mouse_sens)
+    s = s + format("sfx_volume={}\n", opt_sfx_volume)
+    s = s + format("music_volume={}\n", opt_music_volume)
+    fileWrite(path, s)
+end
+
+function options_load()
+    local path = options_path()
+    if not pathExists(path)
+        return
+    end
+    local content = fileRead(path)
+    if content == none or strlen(content) == 0
+        return
+    end
+    local kv = _parse_kv(content)
+    opt_messages     = _kv_bool(kv, "messages")
+    opt_detail_high  = _kv_bool(kv, "detail_high")
+    opt_crosshair    = _kv_bool(kv, "crosshair")
+    opt_screen_size  = int(_kv_get(kv, "screen_size", "9"))
+    opt_mouse_sens   = int(_kv_get(kv, "mouse_sens", "5"))
+    opt_sfx_volume   = int(_kv_get(kv, "sfx_volume", "12"))
+    opt_music_volume = int(_kv_get(kv, "music_volume", "12"))
+    audio_apply_music_volume()
+end
+
+# Returns "EMPTY" or short label like "E1M1 12:34" for the slot picker
+function save_slot_label(slot)
+    local p = save_slot_path(slot)
+    if not pathExists(p)
+        return "EMPTY"
+    end
+    local content = fileRead(p)
+    if content == none or strlen(content) == 0
+        return "EMPTY"
+    end
+    local kv = _parse_kv(content)
+    local map_label = _kv_get(kv, "map", "")
+    if map_label == ""
+        return "?"
+    end
+    local tic = int(_kv_get(kv, "tic", "0"))
+    local secs = tic / 35
+    local mins = secs / 60
+    local rem  = secs - mins * 60
+    return format("{} {}:{}{}", map_label, mins, rem / 10, rem % 10)
+end
+
+function _bool_int(b)
+    if b == true
+        return 1
+    end
+    return 0
+end
+
+function save_game_to_slot(slot)
+    if g_state != GS_LEVEL
+        print("save: not in a level, ignoring")
+        return false
+    end
+    local path = save_slot_path(slot)
+
+    local s = ""
+    s = s + "v=1\n"
+    s = s + format("map={}\n", g_map_name)
+    s = s + format("ep={}\n", g_episode)
+    s = s + format("mn={}\n", g_map_num)
+    s = s + format("sk={}\n", g_skill)
+    s = s + format("tic={}\n", g_tic_count)
+    s = s + format("kill={}\n", g_kill_count)
+    s = s + format("item={}\n", g_item_count)
+    s = s + format("sec={}\n", g_secret_count)
+    s = s + format("tk={}\n", g_total_kills)
+    s = s + format("ti={}\n", g_total_items)
+    s = s + format("ts={}\n", g_total_secrets)
+
+    s = s + format("px={}\n", player_x)
+    s = s + format("py={}\n", player_y)
+    s = s + format("pz={}\n", player_z)
+    s = s + format("pa={}\n", player_angle)
+    s = s + format("ph={}\n", player_health)
+    s = s + format("parm={}\n", player_armor)
+    s = s + format("paty={}\n", player_armor_type)
+    s = s + format("pwpn={}\n", player_weapon)
+    s = s + format("pclip={}\n", player_ammo.clip)
+    s = s + format("pshell={}\n", player_ammo.shell)
+    s = s + format("prock={}\n", player_ammo.rocket)
+    s = s + format("pcell={}\n", player_ammo.cell)
+    s = s + format("pkb={}\n", _bool_int(player_keys.blue))
+    s = s + format("pky={}\n", _bool_int(player_keys.yellow))
+    s = s + format("pkr={}\n", _bool_int(player_keys.red))
+    s = s + format("pinv={}\n", player_invuln_tics)
+    s = s + format("pivs={}\n", player_invis_tics)
+    s = s + format("prad={}\n", player_radsuit_tics)
+    s = s + format("plamp={}\n", player_lightamp_tics)
+    s = s + format("pbsk={}\n", _bool_int(player_berserk))
+    s = s + format("pamap={}\n", _bool_int(player_automap_full))
+
+    local i = 0
+    while i <= 7
+        if player_weapons[format("{}", i)] == true
+            s = s + format("pwn{}=1\n", i)
+        end
+        i = i + 1
+    end
+
+    if map_data != none
+        i = 0
+        while i < map_data.sectors_count
+            local sc = map_data.sectors[i]
+            s = s + format("sc{}={},{}\n", i, sc.floor_h, sc.ceil_h)
+            i = i + 1
+        end
+    end
+
+    s = s + format("ntc={}\n", things_count)
+    i = 0
+    while i < things_count
+        local th = things_active[format("{}", i)]
+        if th != none
+            s = s + format("th{}={},{},{},{},{},{},{},{}\n",
+                i, th.type, th.x, th.y, th.z, th.angle,
+                th.health, th.ai, th.target_idx)
+        end
+        i = i + 1
+    end
+
+    # W1 used flags
+    if g_w1_used != none
+        i = 0
+        while i < map_data.linedefs_count
+            if g_w1_used[format("ld_{}", i)] == true
+                s = s + format("w1_{}=1\n", i)
+            end
+            i = i + 1
+        end
+    end
+
+    fileWrite(path, s)
+    # Capture a thumbnail of the current world view
+    doomSaveThumb(save_slot_thumb_path(slot))
+    print(format("Saved → {}", path))
+    if slot == 0
+        msg_post("Quicksave saved.")
+    else
+        msg_post(format("Saved to slot {}.", slot))
+    end
+    return true
+end
+
+# Backwards-compatible quicksave entry point
+function save_game()
+    return save_game_to_slot(0)
+end
+
+function _parse_kv(content)
+    local kv = {}
+    local lines = strSplit(content, "\n")
+    for i in range(len(lines)):
+        local line = lines[i]
+        if strlen(line) > 0
+            local eq = indexOf(line, "=")
+            if eq > 0
+                local k = substr(line, 0, eq)
+                local v = substr(line, eq + 1, strlen(line) - eq - 1)
+                kv[k] = v
+            end
+        end
+    end
+    return kv
+end
+
+function _kv_get(t, key, default)
+    local v = t[key]
+    if v == none
+        return default
+    end
+    return v
+end
+
+function _kv_bool(t, key)
+    return int(_kv_get(t, key, "0")) == 1
+end
+
+function load_game_from_slot(slot)
+    local path = save_slot_path(slot)
+    if not pathExists(path)
+        print(format("load: no save in slot {}", slot))
+        if slot == 0
+            msg_post("No quicksave to load.")
+        else
+            msg_post(format("Slot {} is empty.", slot))
+        end
+        return false
+    end
+    local content = fileRead(path)
+    if content == none or strlen(content) == 0
+        print("load: empty save")
+        return false
+    end
+    local kv = _parse_kv(content)
+
+    local map_name = _kv_get(kv, "map", "E1M1")
+    g_skill   = int(_kv_get(kv, "sk", "3"))
+    g_episode = int(_kv_get(kv, "ep", "1"))
+    g_map_num = int(_kv_get(kv, "mn", "1"))
+
+    # Load fresh map (this resets things, sectors, w1)
+    game_load_map(map_name)
+
+    # Now overlay saved player state
+    player_x      = float(_kv_get(kv, "px", "0"))
+    player_y      = float(_kv_get(kv, "py", "0"))
+    player_z      = float(_kv_get(kv, "pz", "41"))
+    player_angle  = float(_kv_get(kv, "pa", "0"))
+    player_health = int(_kv_get(kv, "ph", "100"))
+    player_armor  = int(_kv_get(kv, "parm", "0"))
+    player_armor_type = int(_kv_get(kv, "paty", "0"))
+    player_weapon = int(_kv_get(kv, "pwpn", "1"))
+    player_ammo.clip   = int(_kv_get(kv, "pclip", "50"))
+    player_ammo.shell  = int(_kv_get(kv, "pshell", "0"))
+    player_ammo.rocket = int(_kv_get(kv, "prock", "0"))
+    player_ammo.cell   = int(_kv_get(kv, "pcell", "0"))
+    player_keys.blue   = _kv_bool(kv, "pkb")
+    player_keys.yellow = _kv_bool(kv, "pky")
+    player_keys.red    = _kv_bool(kv, "pkr")
+    player_invuln_tics  = int(_kv_get(kv, "pinv", "0"))
+    player_invis_tics   = int(_kv_get(kv, "pivs", "0"))
+    player_radsuit_tics = int(_kv_get(kv, "prad", "0"))
+    player_lightamp_tics = int(_kv_get(kv, "plamp", "0"))
+    player_berserk      = _kv_bool(kv, "pbsk")
+    player_automap_full = _kv_bool(kv, "pamap")
+    player_dead = false
+
+    # Weapons
+    player_weapons = {}
+    local i = 0
+    while i <= 7
+        if _kv_get(kv, format("pwn{}", i), "0") == "1"
+            player_weapons[format("{}", i)] = true
+        end
+        i = i + 1
+    end
+
+    # Sector heights
+    if map_data != none
+        i = 0
+        while i < map_data.sectors_count
+            local val = _kv_get(kv, format("sc{}", i), none)
+            if val != none
+                local parts = strSplit(val, ",")
+                if len(parts) >= 2
+                    map_data.sectors[i].floor_h = int(parts[0])
+                    map_data.sectors[i].ceil_h  = int(parts[1])
+                end
+            end
+            i = i + 1
+        end
+        doomSyncSectors(map_data)
+    end
+
+    # Things
+    local ntc = int(_kv_get(kv, "ntc", "0"))
+    i = 0
+    while i < ntc
+        local val = _kv_get(kv, format("th{}", i), none)
+        if val != none
+            local parts = strSplit(val, ",")
+            if len(parts) >= 9
+                local th = things_active[format("{}", i)]
+                if th != none
+                    th.type   = int(parts[1])
+                    th.x      = float(parts[2])
+                    th.y      = float(parts[3])
+                    th.z      = float(parts[4])
+                    th.angle  = float(parts[5])
+                    th.health = int(parts[6])
+                    th.ai     = int(parts[7])
+                    th.target_idx = int(parts[8])
+                end
+            end
+        end
+        i = i + 1
+    end
+
+    # W1 used
+    g_w1_used = {}
+    i = 0
+    while i < map_data.linedefs_count
+        if _kv_get(kv, format("w1_{}", i), "0") == "1"
+            g_w1_used[format("ld_{}", i)] = true
+        end
+        i = i + 1
+    end
+
+    # Counters
+    g_kill_count   = int(_kv_get(kv, "kill", "0"))
+    g_item_count   = int(_kv_get(kv, "item", "0"))
+    g_secret_count = int(_kv_get(kv, "sec", "0"))
+    g_total_kills  = int(_kv_get(kv, "tk", "0"))
+    g_total_items  = int(_kv_get(kv, "ti", "0"))
+    g_total_secrets = int(_kv_get(kv, "ts", "0"))
+
+    g_state = GS_LEVEL
+    print(format("Loaded ← {}", path))
+    if slot == 0
+        msg_post("Quicksave loaded.")
+    else
+        msg_post(format("Loaded slot {}.", slot))
+    end
+    return true
+end
+
+# Backwards-compatible quickload entry point
+function load_game()
+    return load_game_from_slot(0)
+end
+
+function delete_slot(slot)
+    local sav = save_slot_path(slot)
+    local thm = save_slot_thumb_path(slot)
+    if pathExists(sav)
+        remove(sav)
+    end
+    if pathExists(thm)
+        remove(thm)
+    end
+    msg_post(format("Cleared slot {}.", slot))
+    return true
+end
+
+# Snap a PPM screenshot of the current world frame to cacheDir.
+# Filename includes the current map and tic count for ordering.
+function take_screenshot()
+    local dir = pathJoin(cacheDir(), "sillydoom")
+    dir = pathJoin(dir, "screenshots")
+    mkdirP(dir)
+    local fname = format("{}_{}.ppm", g_map_name, g_tic_count)
+    local path = pathJoin(dir, fname)
+    if doomScreenshot(path) == 1
+        msg_post(format("Saved {}", fname))
+    end
+end

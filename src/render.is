@@ -1,0 +1,137 @@
+# render.is — Renderer bridge to native doom_render extension
+#
+# C extension handles: BSP traversal, textured walls, sky, floor/ceiling,
+#   clipping, sprites (via doomAddSprite)
+# isilly handles: pushing thing positions to sprite buffer each frame
+
+require("doom_render")
+
+function draw_rect(fb, x, y, w, h, r, g, b)
+    local fr = r / 255.0
+    local fg = g / 255.0
+    local fba = b / 255.0
+    local row = y
+    while row < y + h
+        fb.line(x, row, x + w - 1, row, fr, fg, fba, 1.0)
+        row = row + 1
+    end
+end
+
+function render_init(wad, fb, w, h)
+    doomRenderInit(wad, w, h)
+
+    local pal = wadLoadPalette(wad)
+    local cmap = wadLoadColormap(wad)
+    if pal != none
+        if cmap != none
+            doomRenderLoadPalette(pal, cmap)
+        end
+    end
+
+    local tex_idx = wadLoadTextures(wad)
+    doomRenderSetTexIdx(tex_idx)
+end
+
+function render_set_map(map_table)
+    doomRenderSetMap(map_table)
+end
+
+# Compute the active PLAYPAL tint row for this frame from player state.
+# Returns 0..13 to match doomSetPaletteIdx / vanilla PLAYPAL layout:
+#   0     = base, no tint
+#   1..8  = damage red (1=light, 8=heavy)
+#   9..12 = pickup gold
+#   13    = radiation suit green
+function render_palette_idx()
+    # Damage flash takes priority — scale by current damageflash counter
+    # (vanilla maxes out the red ramp when bonuscount/damagecount >= 50)
+    if player_damageflash > 0
+        local lvl = floor(player_damageflash / 2) + 1
+        if lvl > 8
+            lvl = 8
+        end
+        return lvl
+    end
+    # Berserk pickup uses the same red ramp, fading from heavy → light
+    if player_berserk_tic > 0
+        local lvl = floor(player_berserk_tic / 18) + 1
+        if lvl > 8
+            lvl = 8
+        end
+        return lvl
+    end
+    # Bonus pickup gold flash
+    if player_bonus_tic > 0
+        local lvl = floor(player_bonus_tic / 3) + 9
+        if lvl > 12
+            lvl = 12
+        end
+        return lvl
+    end
+    # Radsuit green — solid while active, vanilla blinks the last ~4s
+    # via a script-side blink check (re-using the HUD helper).
+    if player_radsuit_tics > 0
+        if player_radsuit_tics > 175 or (player_radsuit_tics / 8) % 2 == 0
+            return 13
+        end
+    end
+    return 0
+end
+
+function render_sprite_mode(th)
+    # Spectre — fuzz effect
+    if th.type == THING_SPECTRE
+        return DOOM_SPR_FUZZ
+    end
+    # Lost soul — translucent
+    if th.type == THING_SOUL
+        return DOOM_SPR_TRANSLUCENT
+    end
+    # Projectiles — plasma/BFG/imp fireballs are translucent
+    if (th.flags & TF_MISSILE) != 0
+        return DOOM_SPR_TRANSLUCENT
+    end
+    return DOOM_SPR_NORMAL
+end
+
+function render_frame(fb, cam)
+    # Sync sector changes (doors/lifts/lights) to C renderer
+    if map_data != none
+        doomSyncSectors(map_data)
+    end
+
+    # Apply player powerup tints BEFORE drawing the frame
+    if player_invuln_tics > 0
+        doomSetTintColormap(DOOM_CMAP_INVULN)
+    else
+        doomSetTintColormap(-1)
+    end
+    if player_lightamp_tics > 0
+        doomSetForceLight(1)
+    else
+        doomSetForceLight(0)
+    end
+
+    # Pick the active PLAYPAL row from player state. Vanilla precedence:
+    # invuln overrides everything (handled C-side), then damage > pickup
+    # > radsuit. Berserk pickup uses the same red ramp as damage.
+    doomSetPaletteIdx(render_palette_idx())
+
+    # Push all active things to the C sprite buffer (name resolved in isilly)
+    doomClearSprites()
+    for i in range(things_count):
+        local th = things_active[format("{}", i)]
+        if th != none
+            local spr_name = thing_sprite_name(th)
+            local mode = render_sprite_mode(th)
+            doomAddSprite(th.x, th.y, th.z, spr_name, th.type, th.health, th.flags, mode)
+        end
+    end
+
+    # C renderer: sky, BSP walls, flats, sprites, commit
+    # Apply view kick (damage shake) — offsets player position seen by the renderer
+    doomRenderFrame(fb,
+        player_x + player_view_kick_x,
+        player_y + player_view_kick_y,
+        player_z, player_angle)
+end

@@ -1,0 +1,171 @@
+# automap.is — Top-down map overlay
+# Toggle: Tab (ZL on Switch)
+
+automap_on     = false
+automap_scale  = 0.15
+# Panning offsets in world units. Reset to 0 (player-follow) when the
+# map closes.
+automap_pan_x  = 0.0
+automap_pan_y  = 0.0
+AUTOMAP_PAN_SPEED = 64
+
+function automap_toggle()
+    automap_on = not automap_on
+    if not automap_on
+        automap_pan_x = 0.0
+        automap_pan_y = 0.0
+    end
+end
+
+function automap_draw(fb, w, h)
+    if not automap_on
+        return
+    end
+    if map_data == none
+        return
+    end
+
+    draw_rect(fb, 0, 0, w, h - SBAR_HEIGHT, 0, 0, 0)
+
+    local cx = w / 2
+    local cy = (h - SBAR_HEIGHT) / 2
+    local sc = automap_scale
+    local pa = -player_angle
+    # Effective view origin = player + pan offset
+    local ox = player_x + automap_pan_x
+    local oy = player_y + automap_pan_y
+
+    for i in range(map_data.linedefs_count):
+        local ld = map_data.linedefs[i]
+        local v1 = map_data.vertices[ld.v1]
+        local v2 = map_data.vertices[ld.v2]
+
+        local x1 = (v1.x - ox) * sc
+        local y1 = (v1.y - oy) * sc
+        local x2 = (v2.x - ox) * sc
+        local y2 = (v2.y - oy) * sc
+
+        local s = sin(pa)
+        local c = cos(pa)
+        local rx1 = x1 * c - y1 * s + cx
+        local ry1 = -(x1 * s + y1 * c) + cy
+        local rx2 = x2 * c - y2 * s + cx
+        local ry2 = -(x2 * s + y2 * c) + cy
+
+        local lr = 128
+        local lg = 128
+        local lb = 128
+
+        if ld.back < 0
+            lr = 220
+            lg = 220
+            lb = 220
+        end
+
+        if ld.special > 0
+            if ld.special == 26
+                lr = 64
+                lg = 64
+                lb = 255
+            elif ld.special == 27
+                lr = 255
+                lg = 255
+                lb = 0
+            elif ld.special == 28
+                lr = 255
+                lg = 64
+                lb = 64
+            else
+                lr = 255
+                lg = 220
+                lb = 0
+            end
+        end
+
+        fb.line(floor(rx1), floor(ry1), floor(rx2), floor(ry2), lr/255.0, lg/255.0, lb/255.0, 1.0)
+    end
+
+    # Things as dots
+    for i in range(things_count):
+        local th = things_active[format("{}", i)]
+        if th != none
+            local tx = (th.x - ox) * sc
+            local ty = (th.y - oy) * sc
+            local s = sin(pa)
+            local c = cos(pa)
+            local rx = tx * c - ty * s + cx
+            local ry = -(tx * s + ty * c) + cy
+
+            if th.health > 0 and (th.flags & TF_SHOOTABLE) != 0
+                draw_rect(fb, floor(rx) - 1, floor(ry) - 1, 3, 3, 255, 0, 0)
+            else
+                draw_rect(fb, floor(rx) - 1, floor(ry) - 1, 3, 3, 0, 200, 0)
+            end
+        end
+    end
+
+    # Player arrow (points up = forward in rotated view). When the map
+    # is panned the player slides off-center.
+    local px = (player_x - ox) * sc
+    local py = (player_y - oy) * sc
+    local s2 = sin(pa)
+    local c2 = cos(pa)
+    local arx = px * c2 - py * s2 + cx
+    local ary = -(px * s2 + py * c2) + cy
+    local iarx = floor(arx)
+    local iary = floor(ary)
+    draw_rect(fb, iarx - 1, iary - 1, 3, 3, 0, 255, 0)
+    fb.line(iarx, iary, iarx, iary - 8, 1.0, 1.0, 1.0, 1.0)
+    fb.line(iarx, iary - 8, iarx - 3, iary - 3, 1.0, 1.0, 1.0, 1.0)
+    fb.line(iarx, iary - 8, iarx + 3, iary - 3, 1.0, 1.0, 1.0, 1.0)
+
+    # Legend
+    fb.text(fnt, "TAB:close  +/-:zoom  arrows:pan", 4, 4, 0.5, 0.5, 0.5, 1.0)
+    fb.text(fnt, g_map_name, 4, 14, 1.0, 1.0, 0.0, 1.0)
+end
+
+function automap_input()
+    if not automap_on
+        return
+    end
+    if keyPressed(KEY_PERIOD)
+        automap_scale = automap_scale * 1.05
+    end
+    if keyPressed(KEY_MINUS)
+        automap_scale = automap_scale * 0.95
+        if automap_scale < 0.02
+            automap_scale = 0.02
+        end
+    end
+    # Arrow keys pan the map. The view is rotated by player_angle so we
+    # rotate the pan vector to match — pressing Up always pans toward
+    # what's "up" on the visible map.
+    local pdx = 0
+    local pdy = 0
+    if keyPressed(KEY_LEFT)
+        pdx = pdx - 1
+    end
+    if keyPressed(KEY_RIGHT)
+        pdx = pdx + 1
+    end
+    if keyPressed(KEY_UP)
+        pdy = pdy + 1
+    end
+    if keyPressed(KEY_DOWN)
+        pdy = pdy - 1
+    end
+    if pdx != 0 or pdy != 0
+        # Step length in world units — bigger when zoomed out so the
+        # apparent screen movement stays consistent.
+        local step = 4.0 / automap_scale
+        local pa = -player_angle
+        local s = sin(pa)
+        local c = cos(pa)
+        # Inverse-rotate the input vector so screen-up corresponds to
+        # whatever direction is forward in the rotated map view.
+        local wx =  pdx * c + pdy * s
+        local wy = -pdx * s + pdy * c
+        automap_pan_x = automap_pan_x + wx * step
+        automap_pan_y = automap_pan_y + wy * step
+    end
+end

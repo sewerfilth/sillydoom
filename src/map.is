@@ -1,0 +1,50 @@
+# map.is — Map loading via native doom_wad extension + BSP traversal
+#
+# All parsing is done in C by wadLoadMap(). The result is stored in
+# the global `map_data` table with pre-built lists of tables.
+
+map_data   = none
+map_loaded = false
+
+function map_load(wad, name)
+    map_data = wadLoadMap(wad, name)
+    if map_data == none
+        print("ERROR: map not found: " + name)
+        map_loaded = false
+        return false
+    end
+
+    map_loaded = true
+    print(format("Map {}: {} verts, {} lines, {} sectors, {} nodes",
+        name, map_data.vertices_count, map_data.linedefs_count,
+        map_data.sectors_count, map_data.nodes_count))
+    return true
+end
+
+# -- BSP traversal ----------------------------------------------------
+
+function map_point_on_side(x, y, node)
+    local dx = x - node.x
+    local dy = y - node.y
+    if (node.dy * dx - node.dx * dy) > 0
+        return 0
+    end
+    return 1
+end
+
+function map_find_subsector(x, y)
+    if map_data == none
+        return -1
+    end
+    local idx = map_data.nodes_count - 1
+    while (idx & NF_SUBSECTOR) == 0
+        local node = map_data.nodes[idx]
+        local side = map_point_on_side(x, y, node)
+        if side == 0
+            idx = node.child_r
+        else
+            idx = node.child_l
+        end
+    end
+    return idx & 0x7FFF
+end

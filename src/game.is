@@ -1,0 +1,226 @@
+# game.is — Game state, tick logic, level transitions
+
+GS_MENU         = 0
+GS_LEVEL        = 1
+GS_INTERMISSION = 2
+GS_FINALE       = 3
+
+# Skill levels (1..5)
+SKILL_ITYTD = 1   # I'm Too Young To Die  — half damage taken, double ammo
+SKILL_HNTR  = 2   # Hey, Not Too Rough
+SKILL_HMP   = 3   # Hurt Me Plenty
+SKILL_UV    = 4   # Ultra-Violence
+SKILL_NM    = 5   # Nightmare              — fast monsters, respawn, double ammo
+
+g_state      = GS_MENU
+g_wad        = none
+g_map_name   = ""
+g_tic_count  = 0
+g_accum      = 0.0
+g_kill_count = 0
+g_item_count = 0
+g_secret_count = 0
+g_total_kills  = 0
+g_total_items  = 0
+g_total_secrets = 0
+g_exit_pending = false
+g_episode    = 1
+g_map_num    = 1
+g_skill      = SKILL_HMP
+TIC_RATE     = 1.0 / 35
+
+function game_set_skill(s)
+    g_skill = s
+end
+
+function game_skill()
+    return g_skill
+end
+
+function game_init(wad)
+    g_wad   = wad
+    g_state = GS_MENU
+    weapon_init()
+    anim_init_table()
+end
+
+function game_state()
+    return g_state
+end
+
+function game_set_state(state)
+    # Music transitions tied to state changes:
+    #   Menu (paused mid-level) → keep level music playing
+    #   Menu (title)            → DOOM intro music D_INTRO
+    #   Level                   → handled by game_load_map (per-level music)
+    #   Intermission / Finale   → D_INTER / D_VICTOR
+    #
+    # audio_play_music early-outs if the requested track is already playing,
+    # so it's safe to call unconditionally on every state entry.
+    if state == GS_MENU and not menu_paused_from_level
+        audio_play_music("D_INTRO")
+    end
+    if state == GS_INTERMISSION
+        audio_play_music("D_INTER")
+    end
+    if state == GS_FINALE
+        audio_play_music("D_VICTOR")
+    end
+    g_state = state
+end
+
+function game_load_map(name)
+    g_map_name = name
+    print("Loading map: " + name)
+
+    if not map_load(g_wad, name)
+        print("ERROR: Failed to load " + name)
+        return
+    end
+
+    if strlen(name) >= 4 and charAt(name, 0) == "E"
+        g_episode = int(charAt(name, 1))
+        g_map_num = int(charAt(name, 3))
+    end
+
+    # Vanilla picks SKY1..SKY4 by episode. Set this BEFORE render_set_map
+    # so the renderer's load_sky picks up the new lump name.
+    doomSetSky(format("SKY{}", g_episode))
+
+    specials_init()
+    specials_init_scrollers()
+    msg_clear()
+    render_set_map(map_data)
+    anim_scan_map()
+    respawn_clear()
+    things_spawn_map()
+
+    g_total_kills = 0
+    g_total_items = 0
+    for i in range(things_count):
+        local th = things_active[format("{}", i)]
+        if th != none
+            if (th.flags & TF_MONSTER) != 0
+                g_total_kills = g_total_kills + 1
+            end
+            if (th.flags & TF_PICKUP) != 0
+                g_total_items = g_total_items + 1
+            end
+        end
+    end
+    g_kill_count   = 0
+    g_item_count   = 0
+    g_secret_count = 0
+    g_exit_pending = false
+
+    # Count secret sectors (type 9)
+    g_total_secrets = 0
+    for i in range(map_data.sectors_count):
+        local sec = map_data.sectors[i]
+        if sec.special == 9
+            g_total_secrets = g_total_secrets + 1
+        end
+    end
+
+    specials_init_lights()
+
+    local mus_name = "D_" + name
+    audio_play_music(mus_name)
+
+    g_state     = GS_LEVEL
+    g_tic_count = 0
+    g_accum     = 0.0
+end
+
+g_inter_next    = ""
+# When the player takes a secret exit, this stores the map number to
+# return to from E?M9. 0 = no pending return.
+g_secret_return = 0
+
+function game_exit_level()
+    if g_exit_pending
+        return
+    end
+    g_exit_pending = true
+
+    print(format("Level complete! Kills: {}/{}", g_kill_count, g_total_kills))
+
+    # Secret-exit routing — go straight to E?M9 regardless of which map
+    # we came from. After completing E?M9 we should return to E?M(N+1)
+    # where N is the map that originally took us to the secret level.
+    if g_secret_exit
+        g_secret_exit = false
+        g_secret_return = g_map_num + 1
+        g_inter_next    = format("E{}M9", g_episode)
+        g_state         = GS_INTERMISSION
+        inter_begin()
+        return
+    end
+
+    local next_map = g_map_num + 1
+    # When returning from a secret level (E?M9), use the saved return map
+    # so we don't replay the level we secret-exited from.
+    if g_map_num == 9 and g_secret_return > 0
+        next_map = g_secret_return
+        g_secret_return = 0
+    end
+
+    # E?M8 → finale screen for the episode
+    if g_map_num == 8
+        g_inter_next = ""
+        g_state = GS_FINALE
+        finale_begin()
+        return
+    end
+    if next_map > 9
+        g_inter_next = ""
+        g_state = GS_FINALE
+        finale_begin()
+        return
+    end
+
+    g_inter_next = format("E{}M{}", g_episode, next_map)
+    g_state = GS_INTERMISSION
+    inter_begin()
+end
+
+function game_intermission_tick()
+    inter_tick()
+end
+
+function game_intermission_advance()
+    if g_inter_next != ""
+        game_load_map(g_inter_next)
+    else
+        g_state = GS_MENU
+    end
+end
+
+function game_accumulate(dt)
+    g_accum = g_accum + dt
+    # Cap to avoid spiral of death on first frame (Metal shader compilation)
+    if g_accum > 0.25
+        g_accum = 0.25
+    end
+end
+
+function game_should_tick()
+    return g_accum >= TIC_RATE
+end
+
+function game_tick()
+    g_accum     = g_accum - TIC_RATE
+    g_tic_count = g_tic_count + 1
+
+    if g_state == GS_LEVEL
+        player_tick()
+        things_tick()
+        specials_tick()
+        weapon_tick()
+        anim_tick()
+    elif g_state == GS_INTERMISSION
+        game_intermission_tick()
+    elif g_state == GS_FINALE
+        finale_tick()
+    end
+end

@@ -1,0 +1,297 @@
+# audio.is — Sound effects + music via the isilly audio engine
+#
+# SFX: Doom stores sounds as DSXXXX lumps in the WAD in DMX format. We
+# extract each requested lump to a WAV file in a cache dir on first use,
+# then load it through audioLoad() and play through a per-lump source.
+#
+# MUSIC: Doom stores music as D_* lumps in MUS format. We synthesize each
+# requested track via the doom_audio extension's tiny FM synth, write a
+# 16-bit WAV to the cache dir, then play it on a looping audio source.
+
+require("audio")
+require("doom_audio")
+
+a_wad        = none
+a_engine     = -1
+a_buffers    = {}    # name -> buffer handle (-1 if missing)
+a_sources    = {}    # name -> list of N source handles (round-robin pool)
+a_src_next   = {}    # name -> next pool index to use
+a_listener_x = 0.0   # last listener position (set by audio_update_listener)
+a_listener_z = 0.0
+# Number of overlapping plays we tolerate per SFX. Vanilla Doom mixes
+# 8 channels total but per-sound it pools much lower; 4 lets a chaingun
+# burst overlap without all collapsing into the latest hit.
+SFX_POOL_N   = 4
+# Cache dirs are populated in audio_init using cacheDir() — works on macOS,
+# Linux, Windows, and is overridable per-platform.
+a_cache_dir  = ""
+a_music_dir  = ""
+a_ready      = false
+
+# Music state
+a_music_buffers = {}      # lump -> buffer handle
+a_music_sources = {}      # lump -> source handle
+a_music_current = ""      # currently playing music lump name
+
+# Convert 0..15 slider value to a dB gain ([-40 .. 0] dB).
+# Slider 0 = silent (effectively -inf, but we use -60 dB), slider 15 = 0 dB.
+function audio_slider_to_db(v)
+    if v <= 0
+        return -60.0
+    end
+    if v >= 15
+        return 0.0
+    end
+    # Linear in dB: each step is ~2.67 dB
+    return -40.0 + (v / 15.0) * 40.0
+end
+
+# Doom 1 SFX lumps we know about — used as a quick existence check
+SFX_PISTOL  = "DSPISTOL"
+SFX_SHOTGN  = "DSSHOTGN"
+SFX_SGCOCK  = "DSSGCOCK"
+SFX_PLASMA  = "DSPLASMA"
+SFX_BFG     = "DSBFG"
+SFX_SAWUP   = "DSSAWUP"
+SFX_SAWIDL  = "DSSAWIDL"
+SFX_SAWFUL  = "DSSAWFUL"
+SFX_SAWHIT  = "DSSAWHIT"
+SFX_DOOR    = "DSDOROPN"
+SFX_DORCLS  = "DSDORCLS"
+SFX_ITMUP   = "DSITEMUP"
+SFX_OOF     = "DSOOF"
+SFX_NOWAY   = "DSNOWAY"
+SFX_SLOP    = "DSSLOP"
+SFX_PLDETH  = "DSPLDETH"
+SFX_PODTH1  = "DSPODTH1"
+SFX_PSTART  = "DSPSTART"
+SFX_PSTOP   = "DSPSTOP"
+SFX_BAREXP  = "DSBAREXP"
+SFX_RLAUNC  = "DSRLAUNC"
+SFX_FIRSHT  = "DSFIRSHT"
+SFX_TELEPT  = "DSTELEPT"
+SFX_SWTCHN  = "DSSWTCHN"
+SFX_SWTCHX  = "DSSWTCHX"
+
+function audio_init(wad)
+    a_wad = wad
+    # Resolve per-user cache dirs (creates them as needed).
+    # Cache dir is versioned: bumping the version invalidates pre-existing
+    # synthesized files (e.g. when the synth backend changes).
+    local base = pathJoin(cacheDir(), "sillydoom")
+    a_cache_dir = pathJoin(base, "sfx")
+    a_music_dir = pathJoin(base, "mus_v2")
+    mkdirP(a_cache_dir)
+    mkdirP(a_music_dir)
+
+    # Engine: 11025 Hz matches most Doom SFX, stereo for positional output
+    a_engine = audioEngine(11025, AUDIO_STEREO, 1024)
+    if a_engine < 0
+        print("audio: engine init failed, sound disabled")
+        a_ready = false
+        return
+    end
+    # Listener at origin facing +X (player_angle 0); we'll update it per tick
+    audioListener(a_engine, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+    a_ready = true
+    print(format("audio: engine ready (cache: {})", base))
+end
+
+function audio_shutdown()
+    a_ready = false
+end
+
+function audio_load_sfx(name)
+    if not a_ready
+        return -1
+    end
+    if a_buffers[name] != none
+        return a_buffers[name]
+    end
+    local wav = pathJoin(a_cache_dir, name + ".wav")
+    local ok = wadExtractSfxToWav(a_wad, name, wav)
+    if ok == 0
+        a_buffers[name] = -1
+        return -1
+    end
+    local buf = audioLoad(wav)
+    a_buffers[name] = buf
+    if buf >= 0
+        # Allocate a small pool of sources so overlapping plays don't
+        # truncate each other. One audioStop+audioPlay on the SAME
+        # source restarts it instantly — fine for "the chainsaw spun
+        # up", terrible for "the chaingun fired 6 shells".
+        # All sources start NON-SPATIAL by default; audio_play_sfx_pos
+        # promotes its picked source to inverse-attenuation 3D before
+        # playing. The default (inverse-distance, ref=1) catastrophically
+        # amplifies sources that drift even 0.1 units off the listener
+        # — distance 0.1 = ~10x gain. Force AUDIO_ATTEN_NONE.
+        local pool = {}
+        local i = 0
+        while i < SFX_POOL_N
+            local src = audioSource(a_engine, buf)
+            audioAtten(src, 0)
+            pool[format("{}", i)] = src
+            i = i + 1
+        end
+        a_sources[name] = pool
+        a_src_next[name] = 0
+    end
+    return buf
+end
+
+# Pick the next pool slot for this SFX, advancing the round-robin index.
+function _audio_next_src(name)
+    local pool = a_sources[name]
+    if pool == none
+        return -1
+    end
+    local idx = a_src_next[name]
+    if idx == none
+        idx = 0
+    end
+    local src = pool[format("{}", idx)]
+    idx = idx + 1
+    if idx >= SFX_POOL_N
+        idx = 0
+    end
+    a_src_next[name] = idx
+    return src
+end
+
+function audio_play_sfx(name)
+    if not a_ready
+        return
+    end
+    audio_load_sfx(name)
+    local src = _audio_next_src(name)
+    if src < 0
+        return
+    end
+    audioStop(src)
+    audioGain(src, audio_slider_to_db(opt_sfx_volume))
+    # 2D SFX: AUDIO_ATTEN_NONE (set in audio_load_sfx) means position is
+    # ignored, so no need to track listener.
+    audioAtten(src, 0)
+    audioPlay(src)
+end
+
+function audio_play_sfx_pos(name, x, y)
+    if not a_ready
+        return
+    end
+    audio_load_sfx(name)
+    local src = _audio_next_src(name)
+    if src < 0
+        return
+    end
+    audioStop(src)
+    audioGain(src, audio_slider_to_db(opt_sfx_volume))
+    # Positional SFX: re-enable inverse-distance falloff (model 1) and
+    # set the source position in audio-engine units. The pool's default
+    # is AUDIO_ATTEN_NONE (model 0), so we have to flip it back here.
+    # ref_dist 4m and rolloff 1 give vanilla-ish "audible across the
+    # room, fades over a corridor" behaviour with our 0.01 doom-unit
+    # → metre scale. max 200m caps the falloff for very-distant fires.
+    audioAtten(src, 1, 4.0, 200.0, 1.0)
+    # Map Doom 2D world to audio 3D: X=world_x, Y=0 (height), Z=world_y
+    # Scale down so attenuation distances feel right (Doom units → meters-ish)
+    audioPosition(src, x * 0.01, 0, y * 0.01)
+    audioPlay(src)
+end
+
+# Update listener position/orientation each tick from the player state.
+# Music + 2D SFX use AUDIO_ATTEN_NONE so they don't need to track the
+# listener — only positional SFX (audio_play_sfx_pos) actually use the
+# listener for spatial computations.
+function audio_update_listener(px, py, angle)
+    if not a_ready
+        return
+    end
+    local lx = px * 0.01
+    local lz = py * 0.01
+    a_listener_x = lx
+    a_listener_z = lz
+    local fx = cos(angle)
+    local fy = sin(angle)
+    audioListener(a_engine, lx, 0, lz,
+                  fx, 0, fy,
+                  0, 1, 0)
+    audioUpdate(a_engine)
+end
+
+function audio_load_music(name)
+    if not a_ready
+        return -1
+    end
+    if a_music_buffers[name] != none
+        return a_music_buffers[name]
+    end
+    local wav = pathJoin(a_music_dir, name + ".wav")
+    # Synthesize via doom_audio extension at 11025 Hz
+    local ok = doomMusicRender(a_wad, name, wav, 11025)
+    if ok == 0
+        a_music_buffers[name] = -1
+        return -1
+    end
+    local buf = audioLoad(wav)
+    a_music_buffers[name] = buf
+    if buf >= 0
+        local src = audioSource(a_engine, buf)
+        # Looping music — non-spatial. The audio engine's default
+        # inverse-distance attenuation amplifies any source within
+        # ~1 unit of the listener, which makes "music dragged with
+        # the listener" sound like clipped noise. AUDIO_ATTEN_NONE (0)
+        # disables falloff and gives a clean unity-gain playback.
+        audioAtten(src, 0)
+        audioLoop(src, 1)
+        a_music_sources[name] = src
+    end
+    return buf
+end
+
+function audio_play_music(name)
+    if not a_ready
+        return
+    end
+    if a_music_current == name
+        return  # already playing this track
+    end
+    audio_stop_music()
+    audio_load_music(name)
+    local src = a_music_sources[name]
+    if src == none
+        return
+    end
+    audioGain(src, audio_slider_to_db(opt_music_volume))
+    audioPlay(src)
+    a_music_current = name
+end
+
+# Push current music volume into the playing source live (called when slider moves)
+function audio_apply_music_volume()
+    if not a_ready
+        return
+    end
+    if a_music_current == ""
+        return
+    end
+    local src = a_music_sources[a_music_current]
+    if src != none
+        audioGain(src, audio_slider_to_db(opt_music_volume))
+    end
+end
+
+function audio_stop_music()
+    if not a_ready
+        return
+    end
+    if a_music_current == ""
+        return
+    end
+    local src = a_music_sources[a_music_current]
+    if src != none
+        audioStop(src)
+    end
+    a_music_current = ""
+end

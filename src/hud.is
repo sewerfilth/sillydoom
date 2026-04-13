@@ -1,0 +1,267 @@
+# hud.is — Status bar and HUD overlay
+
+hud_wad = none
+hud_w   = 320
+hud_h   = 200
+SBAR_HEIGHT = 32
+
+STT_NUM_W = 14   # width of each STTNUM digit patch
+STT_NUM_H = 16
+
+function hud_init(wad, w, h)
+    hud_wad = wad
+    hud_w   = w
+    hud_h   = h
+end
+
+# Draw a number using STTNUM patches (Doom's big red numbers)
+# Right-aligned at (x, y) with up to max_digits digits
+function hud_draw_number(fb, value, x, y, max_digits)
+    if value < 0
+        value = 0
+    end
+    local str = format("{}", value)
+    local digits = strlen(str)
+    if digits > max_digits
+        digits = max_digits
+    end
+    # Right-align: start from rightmost digit
+    local dx = x
+    local i = digits - 1
+    while i >= 0
+        local ch = charAt(str, i)
+        local lump = "STTNUM" + ch
+        doomDrawPatch(fb, lump, dx, y)
+        dx = dx - STT_NUM_W
+        i = i - 1
+    end
+end
+
+# Draw a percent number (value + "%" glyph)
+function hud_draw_percent(fb, value, x, y)
+    doomDrawPatch(fb, "STTPRCNT", x, y)
+    hud_draw_number(fb, value, x - STT_NUM_W, y, 3)
+end
+
+# Stipple-fill the playfield with a coloured overlay. Stride controls
+# spacing — 2 = every 2x2 (~25%), 3 = every 3x3 (~11%), 4 = every 4x4
+# (~6%). x_off shifts the pattern so multiple overlays don't all hit the
+# same pixels.
+function hud_stipple(fb, bar_y, r, g, b, stride, x_off)
+    local y = x_off
+    while y < bar_y
+        local x = x_off
+        while x < hud_w
+            fb.setPixel(x, y, r, g, b, 1.0)
+            x = x + stride
+        end
+        y = y + stride
+    end
+end
+
+# Powerup expiry blink — once a powerup has < ~5 seconds left it
+# blinks on/off every ~8 tics. Returns true if the overlay should
+# draw this frame.
+function hud_powerup_blink(tics)
+    if tics <= 0
+        return false
+    end
+    if tics > 175
+        return true
+    end
+    return (tics / 8) % 2 == 0
+end
+
+# One row per active powerup, drawn bottom-left above the status bar.
+# Each row is a 2-tone bar (filled colour + remaining time text). Bars
+# blink when their timer drops below 5s (matches hud_powerup_blink).
+function hud_draw_powerup_row(fb, fnt, y, label, tics, max_tics, r, g, b)
+    if tics <= 0
+        return false
+    end
+    if not hud_powerup_blink(tics)
+        # Blink-off frame: draw a faint outline only
+        fb.line(2, y, 2 + 30, y, r * 0.4, g * 0.4, b * 0.4, 1.0)
+        fb.text(fnt, label, 36, y - 3, r * 0.4, g * 0.4, b * 0.4, 1.0)
+        return true
+    end
+    local frac = tics / max_tics
+    if frac > 1.0
+        frac = 1.0
+    end
+    local fill = floor(30 * frac)
+    draw_rect(fb, 2, y - 1, fill, 3, floor(r * 255), floor(g * 255), floor(b * 255))
+    draw_rect(fb, 2 + fill, y - 1, 30 - fill, 3, 32, 32, 32)
+    fb.text(fnt, label + format("{}", tics / 35), 36, y - 3, r, g, b, 1.0)
+    return true
+end
+
+function hud_draw_powerups(fb, fnt, bar_y)
+    local y = bar_y - 8
+    if hud_draw_powerup_row(fb, fnt, y, "I ", player_invuln_tics,  1050, 1.0, 1.0, 0.4)
+        y = y - 8
+    end
+    if hud_draw_powerup_row(fb, fnt, y, "B ", player_invis_tics,   1050, 0.7, 0.7, 0.7)
+        y = y - 8
+    end
+    if hud_draw_powerup_row(fb, fnt, y, "R ", player_radsuit_tics, 2100, 0.4, 1.0, 0.4)
+        y = y - 8
+    end
+    if hud_draw_powerup_row(fb, fnt, y, "L ", player_lightamp_tics, 4200, 0.4, 0.6, 1.0)
+        y = y - 8
+    end
+end
+
+function hud_draw_tint(fb, bar_y)
+    # Damage / berserk / bonus / radsuit are now handled by the C-side
+    # PLAYPAL row swap (see render.is render_palette_idx + commit_frame).
+    # Vanilla doesn't use a PLAYPAL row for partial invisibility — it
+    # FUZZes the player's own sprite, which we don't simulate. Keep a
+    # subtle stipple as a placeholder so the powerup feels visible.
+    if hud_powerup_blink(player_invis_tics)
+        hud_stipple(fb, bar_y, 0.7, 0.7, 0.7, 4, 1)
+    end
+end
+
+function hud_draw(fb, fnt)
+    local bar_y = hud_h - SBAR_HEIGHT
+
+    # Status bar background from WAD
+    doomDrawPatch(fb, "STBAR", 0, bar_y)
+
+    # Ammo count (big red numbers, left side)
+    local ammo_key = "none"
+    local wdef = get_wpn_def(wpn_current)
+    if wdef != none
+        ammo_key = wdef.ammo
+    end
+    if ammo_key != "none"
+        hud_draw_number(fb, get_ammo(ammo_key), 42, bar_y + 3, 3)
+    end
+
+    # Health % (big red numbers)
+    hud_draw_percent(fb, player_health, 104, bar_y + 3)
+
+    # Arms area (weapon number indicators)
+    # STARMS background patch
+    doomDrawPatch(fb, "STARMS", 104, bar_y)
+    local i = 2
+    while i <= 7
+        local lump
+        if player_has_weapon(i)
+            lump = "STYSNUM" + format("{}", i)
+        else
+            lump = "STGNUM" + format("{}", i)
+        end
+        local ax = 111 + ((i - 2) % 3) * 12
+        local ay = bar_y + 4 + ((i - 2) / 3) * 10
+        doomDrawPatch(fb, lump, ax, ay)
+        i = i + 1
+    end
+
+    # Face — vanilla picks a "pain row" by health (00=full, 40=near death)
+    # then a frame within the row by mood: 00=straight, 01=look-left,
+    # 02=look-right, 03=ouch, 04=evil grin. Plus STFGOD0/STFDEAD0
+    # specials.
+    local row = "0"
+    if player_health < 20
+        row = "4"
+    elif player_health < 40
+        row = "3"
+    elif player_health < 60
+        row = "2"
+    elif player_health < 80
+        row = "1"
+    end
+    local face_lump = "STFST" + row + "0"
+    # Slow breathing animation — cycles 00/01/02 for variety
+    local breath = (g_tic_count / 17) % 3
+    if breath == 1
+        face_lump = "STFST" + row + "1"
+    elif breath == 2
+        face_lump = "STFST" + row + "2"
+    end
+    if player_dead
+        face_lump = "STFDEAD0"
+    elif player_invuln_tics > 0
+        face_lump = "STFGOD0"
+    elif player_evil_tic > 0
+        face_lump = "STFEVL" + row
+    elif player_damageflash > 0
+        face_lump = "STFOUCH" + row
+    end
+    doomDrawPatch(fb, face_lump, 143, bar_y + 1)
+
+    # Armor % (big red numbers)
+    hud_draw_percent(fb, player_armor, 235, bar_y + 3)
+
+    # Keys (WAD key patches in the right panel)
+    if player_keys.blue
+        doomDrawPatch(fb, "STKEYS0", 239, bar_y + 3)
+    end
+    if player_keys.yellow
+        doomDrawPatch(fb, "STKEYS1", 239, bar_y + 13)
+    end
+    if player_keys.red
+        doomDrawPatch(fb, "STKEYS2", 239, bar_y + 23)
+    end
+
+    # Ammo counts (small numbers in right panel — clip/shell/rocket/cell).
+    # Rows ~7px apart so the 8px font doesn't visibly collide; max is also
+    # rendered when the slider isn't in use so the player can see caps.
+    fb.text(fnt, format("{}", player_ammo.clip),   288, bar_y + 2,  1.0, 1.0, 1.0, 1.0)
+    fb.text(fnt, format("{}", player_ammo.shell),  288, bar_y + 10, 1.0, 1.0, 1.0, 1.0)
+    fb.text(fnt, format("{}", player_ammo.rocket), 288, bar_y + 18, 1.0, 1.0, 1.0, 1.0)
+    fb.text(fnt, format("{}", player_ammo.cell),   288, bar_y + 25, 1.0, 1.0, 1.0, 1.0)
+
+    # Full-screen palette tints. Vanilla swaps the active PLAYPAL row
+    # to red/gold/green for damage/pickup/radsuit; we don't have palette
+    # swap from script, so we draw a stippled overlay over the playfield
+    # area instead. Each tint picks its colour and stride; lower stride
+    # = denser = stronger apparent tint.
+    hud_draw_tint(fb, bar_y)
+
+    # -- Weapon sprite from WAD --
+    local cx = hud_w / 2 + floor(wpn_bob_x)
+    local cy = hud_h - SBAR_HEIGHT + floor(wpn_bob_y)
+
+    if wpn_state == WS_RAISE
+        local wdef2 = get_wpn_def(wpn_current)
+        if wdef2 != none
+            local frac = wpn_tics / wdef2.raise_t
+            cy = cy + floor(frac * 40)
+        end
+    end
+    if wpn_state == WS_LOWER
+        local wdef2 = get_wpn_def(wpn_current)
+        if wdef2 != none
+            local frac = 1.0 - (wpn_tics / wdef2.lower_t)
+            cy = cy + floor(frac * 40)
+        end
+    end
+
+    # Weapon sprite name (isilly lookup, C draws the patch)
+    local wpn_spr = wpn_sprite_name(wpn_current)
+    if wpn_flash > 0
+        wpn_spr = wpn_flash_name(wpn_current)
+    end
+    doomDrawPatch(fb, wpn_spr, cx, cy)
+
+    # Powerup timer strip — small coloured bars + seconds remaining,
+    # bottom-left of the playfield. Each entry blinks when expiring.
+    hud_draw_powerups(fb, fnt, bar_y)
+
+    # Crosshair (optional) — only when alive
+    if opt_crosshair and not player_dead
+        local xh = hud_w / 2
+        local yh = (hud_h - SBAR_HEIGHT) / 2
+        fb.line(xh - 3, yh, xh + 3, yh, 0.4, 1.0, 0.4, 1.0)
+        fb.line(xh, yh - 3, xh, yh + 3, 0.4, 1.0, 0.4, 1.0)
+    end
+
+    # Death overlay — pulsing prompt to respawn
+    if player_dead
+        local pulse = 0.6 + 0.4 * sin(g_tic_count * 0.15)
+        fb.text(fnt, "PRESS SPACE TO RESPAWN", 90, 88, pulse, 0.2, 0.2, 1.0)
+    end
+end
