@@ -1,6 +1,6 @@
 # sillydoom
 
-**DOOM on the isilly engine** — id Software's DOOM (linuxdoom-1.10) ported to run as an isilly extension. Plays on macOS, Linux, and Nintendo Switch.
+**DOOM on the isilly engine** — id Software's DOOM (linuxdoom-1.10) ported to run as an isilly extension. Plays on macOS, Linux, and Nintendo Switch. (v22.0)
 
 ![sillydoom](switch/icon/icon.jpg)
 
