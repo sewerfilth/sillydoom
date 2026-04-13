@@ -8,7 +8,7 @@
 
 ## What is this?
 
-sillydoom is a port of the original 1993 DOOM engine running on [isilly](https://github.com/allbrancereal/sillystate), a Lua/Python hybrid scripting engine. The id DOOM source code (all 63 .c files) is compiled into a native extension that the isilly runtime loads and executes.
+sillydoom is a port of the original 1993 DOOM engine running on [isilly](https://github.com/sewerfilth/sillystate), a Lua/Python hybrid scripting engine. The id DOOM source code (all 63 .c files) is compiled into a native extension that the isilly runtime loads and executes.
 
 **Features:**
 - Full DOOM gameplay (E1M1 through E3M9 for Registered, all of DOOM II)
@@ -21,7 +21,7 @@ sillydoom is a port of the original 1993 DOOM engine running on [isilly](https:/
 
 ## Requirements
 
-- **isilly** runtime (part of [SillyState](https://github.com/allbrancereal/sillystate)) — not included, proprietary
+- **isilly** runtime (part of [SillyState](https://github.com/sewerfilth/sillystate)) — not included, proprietary
 - **DOOM WAD file** — not included, provide your own
   - `DOOM1.WAD` (Shareware) — free from [doomwiki.org](https://doomwiki.org/wiki/DOOM1.WAD)
   - `DOOM.WAD` (Registered)
