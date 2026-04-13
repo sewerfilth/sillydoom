@@ -119,6 +119,7 @@ sillydoom/
 - **sillydoom** port by sewerfilth
 
 https://www.cuteheart.love
+https://discord.gg/VfQyvSzpcd
 
 ## License
 
