@@ -1,0 +1,86 @@
+# main_engine.is — sillydoom powered by id Software's DOOM engine.
+#
+# WAD loading priority:
+#   1. ./wads/*.wad   (user override — drop a WAD here to replace)
+#   2. ./*.wad        (current directory)
+#   3. ./assets/*.wad (bundled with app)
+#
+# macOS .app and Linux tarball ship with assets/DOOM.WAD embedded.
+# To use a different WAD, drop it in wads/ — it takes priority.
+
+require("gpu")
+require("platform_windowing")
+require("platform_input")
+require("platform_io")
+require("doom_engine")
+
+configLoad(".")
+TITLE  = configGetString("app.title", "sillydoom")
+WIDTH  = configGetInt("app.width", 1280)
+HEIGHT = configGetInt("app.height", 720)
+
+# Search for WAD — user override first, then bundled
+wad = none
+
+# 1. wads/ override directory (user drop-in, takes priority)
+if wad == none and pathExists("wads/DOOM2.WAD")
+    wad = "wads/DOOM2.WAD"
+end
+if wad == none and pathExists("wads/doom2.wad")
+    wad = "wads/doom2.wad"
+end
+if wad == none and pathExists("wads/DOOM.WAD")
+    wad = "wads/DOOM.WAD"
+end
+if wad == none and pathExists("wads/doom.wad")
+    wad = "wads/doom.wad"
+end
+if wad == none and pathExists("wads/DOOM1.WAD")
+    wad = "wads/DOOM1.WAD"
+end
+if wad == none and pathExists("wads/doom1.wad")
+    wad = "wads/doom1.wad"
+end
+
+# 2. Current directory
+if wad == none and pathExists("DOOM2.WAD")
+    wad = "DOOM2.WAD"
+end
+if wad == none and pathExists("DOOM.WAD")
+    wad = "DOOM.WAD"
+end
+if wad == none and pathExists("DOOM1.WAD")
+    wad = "DOOM1.WAD"
+end
+
+# 3. Bundled assets (shipped with .app / tarball)
+if wad == none and pathExists("assets/DOOM.WAD")
+    wad = "assets/DOOM.WAD"
+end
+if wad == none and pathExists("assets/DOOM1.WAD")
+    wad = "assets/DOOM1.WAD"
+end
+if wad == none and pathExists("assets/DOOM2.WAD")
+    wad = "assets/DOOM2.WAD"
+end
+if wad == none and pathExists("assets/doom.wad")
+    wad = "assets/doom.wad"
+end
+if wad == none and pathExists("assets/doom1.wad")
+    wad = "assets/doom1.wad"
+end
+if wad == none and pathExists("assets/doom2.wad")
+    wad = "assets/doom2.wad"
+end
+
+if wad == none
+    print("ERROR: No WAD found!")
+    print("Place DOOM.WAD in wads/, assets/, or current directory")
+    exit(1)
+end
+
+fb = framebuffer(320, 200)
+win = windowCreate(TITLE, WIDTH, HEIGHT)
+
+print("sillydoom: " .. wad)
+doomRun(fb, win, wad)

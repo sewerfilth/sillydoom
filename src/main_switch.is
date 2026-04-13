@@ -1,0 +1,51 @@
+# main_switch.is — sillydoom on Nintendo Switch.
+#
+# WAD loading priority:
+#   1. sdmc:/switch/sillydoom/*.wad (user-provided, drop-in)
+#   2. romfs:/assets/*.wad (embedded in NRO, if present)
+#
+# Drop any DOOM WAD into sdmc:/switch/sillydoom/ and launch.
+
+require("platform_input")
+require("platform_io")
+require("doom_engine")
+
+# Search for WAD in sdmc first (user-provided), then romfs (embedded)
+wad = none
+
+# sdmc — user drops WAD here
+if wad == none and pathExists("sdmc:/switch/sillydoom/doom.wad")
+    wad = "sdmc:/switch/sillydoom/doom.wad"
+end
+if wad == none and pathExists("sdmc:/switch/sillydoom/doom1.wad")
+    wad = "sdmc:/switch/sillydoom/doom1.wad"
+end
+if wad == none and pathExists("sdmc:/switch/sillydoom/doom2.wad")
+    wad = "sdmc:/switch/sillydoom/doom2.wad"
+end
+if wad == none and pathExists("sdmc:/switch/sillydoom/DOOM.WAD")
+    wad = "sdmc:/switch/sillydoom/DOOM.WAD"
+end
+if wad == none and pathExists("sdmc:/switch/sillydoom/DOOM1.WAD")
+    wad = "sdmc:/switch/sillydoom/DOOM1.WAD"
+end
+if wad == none and pathExists("sdmc:/switch/sillydoom/DOOM2.WAD")
+    wad = "sdmc:/switch/sillydoom/DOOM2.WAD"
+end
+
+# romfs — embedded in NRO
+if wad == none and pathExists("assets/doom.wad")
+    wad = "assets/doom.wad"
+end
+if wad == none and pathExists("assets/doom1.wad")
+    wad = "assets/doom1.wad"
+end
+
+if wad == none
+    print("ERROR: No WAD found!")
+    print("Place DOOM.WAD in sdmc:/switch/sillydoom/")
+    exit(1)
+end
+
+print("sillydoom: " .. wad)
+doomRun(none, -1, wad)

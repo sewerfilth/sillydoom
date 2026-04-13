@@ -1,0 +1,10 @@
+Place your DOOM WAD file here.
+
+Supported WADs:
+  DOOM.WAD    (DOOM Registered)
+  DOOM1.WAD   (DOOM Shareware)
+  DOOM2.WAD   (DOOM II)
+
+The WAD is NOT included — you must provide your own.
+Get the shareware WAD from: https://doomwiki.org/wiki/DOOM1.WAD
+
