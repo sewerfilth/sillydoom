@@ -29,6 +29,8 @@ sillydoom is a port of the original 1993 DOOM engine running on [isilly](https:/
 - **CMake 3.10+** and a C compiler
 - **devkitPro** (for Nintendo Switch builds)
 
+You also need to put the doom engine into ext/doom_engine Linked below
+
 ## Building
 
 ### macOS
